@@ -8,7 +8,8 @@ from tmlib.core import File
 def python_reader():
     File.launch("PythonReader")
 
-
+def maya_file_browser():
+    File.launch("UkoreBrowser")
 def maya_publisher():
     # Merged 2026-08-05 — RigPublisher/ModelPublisher/AnimationPublisher's
     # own menu launchers used to each open a different plugin; now all

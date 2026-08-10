@@ -43,6 +43,13 @@ def loadMenu():
             allowOptionBoxes=True,
         )
 
+
+    cmds.menuItem(
+        label="Maya File Browser...",
+        parent=MENU_MAIN,
+        command="import UkoreMaya; from UkoreMaya.core import menu_utils; menu_utils.maya_file_browser()",
+    )
+
     cmds.menuItem(
         label="Quick Script...",
         # image="contentBrowserGeneric.png",
