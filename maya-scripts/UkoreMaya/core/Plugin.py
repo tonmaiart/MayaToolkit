@@ -9,12 +9,17 @@ from tmlib.core import System
 def reload_plugins():
     reload_scripts()
 
-    plugin = "ukoreMaya"
-    if cmds.pluginInfo(plugin, q=True, loaded=True):
-        cmds.unloadPlugin(plugin)
-    cmds.loadPlugin(plugin)
+    # Re-import UkoreMaya to re-run its module-level menu registration
+    import UkoreMaya
+    reload(UkoreMaya)
 
-    cmds.inViewMessage(amg="Plug-ins Reloaded!", pos="botCenter", fade=True)
+    try:
+        from UkoreMenu import registry
+        registry.rebuild_menu()
+    except ImportError:
+        pass
+
+    cmds.inViewMessage(amg="MayaToolkit Scripts Reloaded!", pos="botCenter", fade=True)
 
 
 def reload_scripts():

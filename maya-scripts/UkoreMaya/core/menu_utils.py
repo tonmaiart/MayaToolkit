@@ -14,7 +14,8 @@ def maya_publisher():
     # Merged 2026-08-05 — RigPublisher/ModelPublisher/AnimationPublisher's
     # own menu launchers used to each open a different plugin; now all
     # three "...Publish..." menu items (Model/Rig/Animation, see
-    # ukoreMaya.py) call this one, which opens the single MayaPublisher
+    # UkoreMaya/__init__.py's registry.register_item() calls) call this one,
+    # which opens the single MayaPublisher
     # window. The window itself then displays according to the active
     # repo's configured Publish Mode, regardless of which menu the artist
     # clicked through.
