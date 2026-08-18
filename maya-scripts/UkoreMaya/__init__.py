@@ -82,6 +82,14 @@ try:
             order=30,
         ),
 
+        MenuItemSpec(
+            id="fix_sound_offset",
+            label="Fix Sound Offset",
+            category="General",
+            command="import UkoreMaya; from UkoreMaya.library import fix_sound_offset; fix_sound_offset.fix_sound_offset()",
+            order=40,
+        ),
+
         # --- Selection (submenu: "Common", order 100s) ---
         MenuItemSpec(
             id="flip_selection",
