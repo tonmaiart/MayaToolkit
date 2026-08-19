@@ -56,6 +56,35 @@ def save_increment():
 
     return new_path
 
+def revert_file():
+    """
+    Reopens the currently saved file, discarding all unsaved changes.
+    Prompts the user for confirmation before reverting.
+    """
+    current_path = cmds.file(q=True, sn=True)
+    if not current_path:
+        cmds.warning("Please save your file first.")
+        return
+
+    confirm = cmds.confirmDialog(
+        title="Revert File",
+        message="Discard all unsaved changes and reopen:\n\n{}".format(current_path),
+        button=["Revert", "Cancel"],
+        defaultButton="Cancel",
+        cancelButton="Cancel",
+        dismissString="Cancel",
+    )
+
+    if confirm != "Revert":
+        return
+
+    cmds.file(current_path, open=True, force=True)
+
+    cmds.inViewMessage(
+        amg="<hl>Reverted to Saved File</hl>", pos="midCenter", fade=True
+    )
+
+
 def open_folder_dir(path):
     """ Open Given Folder Path"""
     os.startfile(os.path.dirname(path))

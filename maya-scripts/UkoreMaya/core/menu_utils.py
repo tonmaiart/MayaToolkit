@@ -76,6 +76,10 @@ def save_increment():
     File.save_increment()
 
 
+def revert_file():
+    File.revert_file()
+
+
 # "Update All Reference and Picker" used to live here, calling
 # function.update_references() — removed 2026-08-03, absorbed into Ukore
 # Reference Editor's Maya File tab (per-row "Update Version" button, see

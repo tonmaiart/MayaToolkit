@@ -89,6 +89,13 @@ try:
             command="import UkoreMaya; from UkoreMaya.library import fix_sound_offset; fix_sound_offset.fix_sound_offset()",
             order=40,
         ),
+        MenuItemSpec(
+            id="revert_file",
+            label="Revert File...",
+            category="General",
+            command="import UkoreMaya; from UkoreMaya.core import menu_utils; menu_utils.revert_file()",
+            order=50,
+        ),
 
         # --- Selection (submenu: "Common", order 100s) ---
         MenuItemSpec(
