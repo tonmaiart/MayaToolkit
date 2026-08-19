@@ -504,5 +504,24 @@ try:
     for item in items:
         registry.register_item(item)
 
+    # ---------------------------------------------------------------
+    # Register with UkoreMenu's central Reload Plugin system — reuses
+    # MayaToolkit's own existing reload logic (already reloads its modules
+    # in dependency order and calls UkoreMenu.registry.rebuild_menu()
+    # itself, see UkoreMaya/core/Plugin.py's reload_plugins()) instead of
+    # the generic UkoreMenu.reload_package() helper.
+    # ---------------------------------------------------------------
+    from UkoreMenu import ReloadHandlerSpec
+    from UkoreMaya.core.Plugin import reload_plugins as _reload_maya_toolkit
+
+    registry.register_reload_handler(
+        ReloadHandlerSpec(
+            id="maya_toolkit",
+            label="MayaToolkit",
+            callback=_reload_maya_toolkit,
+            order=10,
+        )
+    )
+
 except ImportError:
     pass
