@@ -123,9 +123,11 @@ def reference_file():
         cmds.confirmDialog(title="Error", message=str(e))
 
 
-# Playblast moved out to its own plugin 2026-07-19 — see
-# plugins/repo_internal/UkorePlayblast/maya-scripts/UkorePlayblast/
-# function.py's publish_playblast (called from menu_utils.py's playblast()).
+# Playblast moved out to its own plugin 2026-07-19, then merged into
+# cache/plugins/UkoreShot/ 2026-08-20 — see that plugin's
+# maya-scripts/UkorePlayblast/function.py's publish_playblast, which now
+# registers its own "Playblast"/"Playblast Options..." menu items directly
+# into ukore_menu instead of being wired through this plugin.
 
 # ================================
 

@@ -10,24 +10,10 @@ def python_reader():
 
 def maya_file_browser():
     File.launch("UkoreBrowser")
-def maya_publisher():
-    # Merged 2026-08-05 — RigPublisher/ModelPublisher/AnimationPublisher's
-    # own menu launchers used to each open a different plugin; now all
-    # three "...Publish..." menu items (Model/Rig/Animation, see
-    # UkoreMaya/__init__.py's registry.register_item() calls) call this one,
-    # which opens the single MayaPublisher
-    # window. The window itself then displays according to the active
-    # repo's configured Publish Mode, regardless of which menu the artist
-    # clicked through.
-    File.launch("MayaPublisher")
 
 
 def publish_browser():
     File.launch("PublishBrowser")
-
-
-def ukore_reference_editor():
-    File.launch("UkoreReferenceEditor")
 
 
 def renamer():
@@ -212,21 +198,6 @@ def studio_library():
 
 def faster_plugin():
     function.setup_faster_load()
-
-
-def playblast():
-    # Split out into its own plugin 2026-07-19 (configurable options +
-    # destination now live entirely inside Maya instead of being
-    # hardcoded here) — see plugins/repo_internal/UkorePlayblast/README.md.
-    from UkorePlayblast import function as ukore_playblast
-
-    ukore_playblast.publish_playblast()
-
-
-def playblast_options():
-    from UkorePlayblast import options_dialog as ukore_playblast_options
-
-    ukore_playblast_options.show()
 
 
 def print_selected():

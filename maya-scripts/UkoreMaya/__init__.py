@@ -1,5 +1,4 @@
 import maya.cmds as cmds
-import maya.api.OpenMaya as om
 from UkoreMaya.core import utils
 
 # ====================================================================
@@ -10,50 +9,20 @@ try:
 except Exception as e:
     cmds.warning(f"Failed to setup Marking Menus: {e}")
 
-# ====================================================================
-# 2. Ukore Reference Editor — automatic scene-open callback
-# ====================================================================
-# Moved here from the retired maya-plug-ins/ukoreMaya.py. Must be
-# registered synchronously (not evalDeferred) — this module is imported
-# from MayaToolkit/plugin.py's pre_open_mel launch hook, which runs before
-# MayaLauncher's `file -open` in the same launch command, so kAfterOpen
-# fires for that very first scene open too, not just later manual opens.
-_ukore_reference_editor_callback_id = None
-
-
-def _on_scene_opened(*_args):
-    try:
-        from UkoreReferenceEditor import core as ukore_reference_editor_core
-    except ImportError:
-        return
-
-    try:
-        should_open_editor = ukore_reference_editor_core.auto_check_and_redirect()
-    except Exception as exc:
-        cmds.warning(f"Ukore Reference Editor's automatic check failed: {exc}")
-        return
-
-    if should_open_editor:
-        try:
-            from UkoreMaya.core import menu_utils
-            menu_utils.ukore_reference_editor()
-        except Exception as exc:
-            cmds.warning(f"Ukore Reference Editor failed to open automatically: {exc}")
-
-
-def _register_ukore_reference_editor_callback():
-    global _ukore_reference_editor_callback_id
-    if _ukore_reference_editor_callback_id is not None:
-        return
-    _ukore_reference_editor_callback_id = om.MSceneMessage.addCallback(
-        om.MSceneMessage.kAfterOpen, _on_scene_opened
-    )
-
-
-_register_ukore_reference_editor_callback()
+# Ukore Reference Editor's own automatic scene-open callback (reference/
+# texture/audio auto-fix) and "Ukore Reference Editor..." menu item used to
+# be dispatched from here — removed 2026-08-20. UkoreReferenceEditor now
+# registers both itself, independent of MayaToolkit: its own plugin.py
+# contributes its own pre_open_mel launch hook (`import
+# UkoreReferenceEditor`), and its own __init__.py registers the kAfterOpen
+# callback (core.py's register_scene_open_callback) and the UkoreMenu item
+# (register_menu(), called from post_open_mel) directly. Keeping a second
+# copy here would have duplicate-registered the same "ukore_reference_editor"
+# menu id into UkoreMenu's registry and double-run the auto-fix on every
+# scene open.
 
 # ====================================================================
-# 3. Register menu items into ukore_menu's central registry
+# 2. Register menu items into ukore_menu's central registry
 # ====================================================================
 try:
     from UkoreMenu import registry, MenuItemSpec
@@ -74,14 +43,6 @@ try:
             command="import UkoreMaya; from UkoreMaya.core import menu_utils; menu_utils.save_increment()",
             order=20,
         ),
-        MenuItemSpec(
-            id="ukore_reference_editor",
-            label="Ukore Reference Editor...",
-            category="General",
-            command="import UkoreMaya; from UkoreMaya.core import menu_utils; menu_utils.ukore_reference_editor()",
-            order=30,
-        ),
-
         MenuItemSpec(
             id="fix_sound_offset",
             label="Fix Sound Offset",
@@ -264,13 +225,6 @@ try:
             command="import UkoreMaya; from UkoreMaya.core import menu_utils; menu_utils.export_selected_to_multiple()",
             order=70,
         ),
-        MenuItemSpec(
-            id="model_publish",
-            label="Model Publish...",
-            category="Model",
-            command="import UkoreMaya; from UkoreMaya.core import menu_utils; menu_utils.maya_publisher()",
-            order=80,
-        ),
 
         # --- Rig (submenu: "Rig") ---
         MenuItemSpec(
@@ -448,13 +402,6 @@ try:
             command="import UkoreMaya; from UkoreMaya.core import menu_utils; menu_utils.add_multi_skin()",
             order=95,
         ),
-        MenuItemSpec(
-            id="rig_publish",
-            label="Rig Publish...",
-            category="Rig",
-            command="import UkoreMaya; from UkoreMaya.core import menu_utils; menu_utils.maya_publisher()",
-            order=96,
-        ),
 
         # --- Animation (submenu: "Anim") ---
         MenuItemSpec(
@@ -477,27 +424,6 @@ try:
             category="Anim",
             command="import UkoreMaya; from UkoreMaya.core import menu_utils; menu_utils.shot_splitter()",
             order=30,
-        ),
-        MenuItemSpec(
-            id="playblast",
-            label="Playblast",
-            category="Anim",
-            command="import UkoreMaya; from UkoreMaya.core import menu_utils; menu_utils.playblast()",
-            order=40,
-        ),
-        MenuItemSpec(
-            id="playblast_options",
-            label="Playblast Options...",
-            category="Anim",
-            command="import UkoreMaya; from UkoreMaya.core import menu_utils; menu_utils.playblast_options()",
-            order=41,
-        ),
-        MenuItemSpec(
-            id="animation_publish",
-            label="Animation Publish...",
-            category="Anim",
-            command="import UkoreMaya; from UkoreMaya.core import menu_utils; menu_utils.maya_publisher()",
-            order=50,
         ),
     ]
 
