@@ -44,10 +44,6 @@ def weight_puller():
     File.launch("WeightPuller")
 
 
-def shot_splitter():
-    File.launch("ShotSplitter")
-
-
 def cfx_tools():
     File.launch("CFXTools")
 

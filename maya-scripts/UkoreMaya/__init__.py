@@ -418,13 +418,14 @@ try:
             command="import UkoreMaya; from UkoreMaya.core import menu_utils; menu_utils.studio_library()",
             order=20,
         ),
-        MenuItemSpec(
-            id="shot_splitter",
-            label="Shot Splitter",
-            category="Anim",
-            command="import UkoreMaya; from UkoreMaya.core import menu_utils; menu_utils.shot_splitter()",
-            order=30,
-        ),
+        # ShotSplitter's own "Shot Splitter..." menu item used to be
+        # dispatched from here via menu_utils.shot_splitter() /
+        # File.launch("ShotSplitter") — removed 2026-08-22. ShotSplitter now
+        # registers itself, independent of MayaToolkit: its own plugin.py
+        # contributes its own launch_hooks entry (`import ShotSplitter`),
+        # and its own __init__.py registers the UkoreMenu item directly.
+        # Keeping a second copy here would have duplicate-registered the
+        # same "shot_splitter" menu id into UkoreMenu's registry.
     ]
 
     for item in items:
