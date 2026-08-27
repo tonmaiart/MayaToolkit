@@ -262,22 +262,17 @@ try:
             command="import UkoreMaya; from UkoreMaya.core import menu_utils; menu_utils.weight_puller()",
             order=50,
         ),
-        MenuItemSpec(
-            id="advanced_skeleton",
-            label="Advanced Skeleton",
-            category="Rig",
-            sub_menu="External Tools",
-            command="import UkoreMaya; from UkoreMaya.core import menu_utils; menu_utils.run_advanced()",
-            order=60,
-        ),
-        MenuItemSpec(
-            id="advanced_skeleton_face",
-            label="Advanced Skeleton Face",
-            category="Rig",
-            sub_menu="External Tools",
-            command="import UkoreMaya; from UkoreMaya.core import menu_utils; menu_utils.run_advanced_face()",
-            order=61,
-        ),
+        # AdvancedSkeleton's "Advanced Skeleton"/"Advanced Skeleton Face" menu
+        # items used to be dispatched from here via menu_utils.run_advanced()/
+        # run_advanced_face() — removed 2026-08-27. ukore_advanced_skeleton
+        # now registers both itself, independent of MayaToolkit: its own
+        # plugin.py contributes its own launch_hooks entry (`import
+        # UkoreAdvancedSkeleton`), and its own maya-scripts/UkoreAdvancedSkeleton/
+        # __init__.py registers the same "advanced_skeleton"/
+        # "advanced_skeleton_face" UkoreMenu items directly (still under
+        # Rig > External Tools, same ids/order as before). Keeping a second
+        # copy here would have duplicate-registered those ids into UkoreMenu's
+        # registry.
         MenuItemSpec(
             id="ng_skin_tools",
             label="ngSkinTools",

@@ -76,4 +76,26 @@ Keeping a second copy here duplicate-registered the same
 `"ukore_reference_editor"` menu id into `UkoreMenu`'s registry and
 double-ran the auto-fix on every scene open — removed rather than left as
 harmless redundancy.
+
+**2026-08-27: AdvancedSkeleton's "Advanced Skeleton"/"Advanced Skeleton
+Face" menu items (Rig > External Tools) — removed.**
+`cache/plugins/ukore_advanced_skeleton/` now registers both itself,
+independent of MayaToolkit: its own `plugin.py` contributes its own
+`launch_hooks` entry (`import UkoreAdvancedSkeleton`), and its own
+`maya-scripts/UkoreAdvancedSkeleton/__init__.py` registers the same
+`"advanced_skeleton"`/`"advanced_skeleton_face"` `UkoreMenu` items and a
+reload handler directly — same ids/order/submenu as before, so this is a
+no-op for anyone using the menu. `UkoreMaya/core/function.py`'s
+`_advanced_skeleton_root()`/`run_advance()`/`run_advance_face()` and
+`menu_utils.py`'s `run_advanced()`/`run_advanced_face()` wrappers moved
+there too. `ukore_advanced_skeleton/plugin.py` also had two real bugs
+fixed in the same change: it computed its own `maya-scripts` path via
+`api.app_root / "plugins" / "studio" / "AdvancedSkeleton"` (stale from
+before its 2026-07-19 split into a standalone `cache/plugins/` clone —
+that path doesn't exist any more) instead of `Path(__file__).resolve().parent`,
+and it wrote its `PYTHONPATH`/`ADVANCEDSKELETON_ROOT` contribution into
+the shared studio-wide `plugin_config_store(..., shared=True)` store
+instead of the per-project `project_plugin_config_store(...)` store
+`maya_launcher`/`MayaToolkit`/`ukore_menu` actually read from — so the
+contribution never reached Maya Launcher's env bridge at all.
 # MayaToolkit

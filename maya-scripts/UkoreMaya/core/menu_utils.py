@@ -136,13 +136,10 @@ def validate_facesets():
 
 # ------------- Rig ------------------------------
 
-
-def run_advanced():
-    function.run_advance()
-
-
-def run_advanced_face():
-    function.run_advance_face()
+# run_advanced()/run_advanced_face() (AdvancedSkeleton launchers) moved to
+# ukore_advanced_skeleton/maya-scripts/UkoreAdvancedSkeleton/__init__.py on
+# 2026-08-27 — that plugin now owns its own Rig menu items instead of going
+# through MayaToolkit, see UkoreMaya/__init__.py's removal comment.
 
 
 def auto_constraint(mode):
