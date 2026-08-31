@@ -19,6 +19,18 @@ UkoreReferenceEditor/ShotSplitter splits above.
 `UkoreMaya/core/menu_utils.py`'s corresponding wrapper functions were
 removed too.
 
+**2026-09-01: `UkoreMaya/custom_library/` removed, moved to
+`cache/plugins/RigToolkit/PythonReader/custom_library/`.** These scripts
+were only ever reachable through `RigToolkit/PythonReader`'s
+config-driven "Global Paths" function browser (removed the same day, see
+RigToolkit's own README) — nothing in `MayaToolkit` itself imported this
+folder. They still `import UkoreMaya`/`from UkoreMaya.core import ...`/
+`from UkoreMaya.menu import ...` directly from their new home, which
+keeps resolving at runtime through the shared `maya_launcher_env_bridge`
+PYTHONPATH merge (`RigToolkit` declares `requires: ["maya_toolkit", ...]`
+in its `manifest.json`) — same flat-namespace convention `File.launch()`
+itself already relies on, so this is not a new coupling.
+
 MayaToolkit — UkoreHub's own vendored Maya scripts and plug-ins (Renamer,
 RigBox, WeightPuller, `tmlib`, `UkoreMaya`, and friends, under
 `maya-scripts/`), plus compiled plug-ins under `maya-plug-ins/`. Unchanged
