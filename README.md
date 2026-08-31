@@ -1,5 +1,24 @@
 # plugins/repo_internal/MayaToolkit/
 
+**2026-08-31: Renamer/Attribute/PythonReader ("Local Script")/QuickData/
+EasyController/Snapper/WeightPuller — removed, moved to
+`cache/plugins/RigToolkit/`.** These toolkit folders no longer lived under
+this plugin's `maya-scripts/` at all (only `UkoreMaya/` and `tmlib/`
+remained here — the menu items calling them were dangling), so they were
+never actually reachable through this plugin any more. `RigToolkit` now
+owns both the implementations (`RigToolkit/<Name>/interface.py`, same
+`tmlib.core.File.launch("<Name>")` convention) and their menu registration:
+its own `plugin.py` contributes its own root folder to the
+`maya_launcher_env_bridge` `PYTHONPATH` and its own `launch_hooks` entry
+(`import UkoreRigToolkit`), and `RigToolkit/UkoreRigToolkit/__init__.py`
+registers the same `"renamer"`/`"attribute_tool"`/`"local_script"`/
+`"quick_data"`/`"easy_controller"`/`"snapper"`/`"weight_puller"` `UkoreMenu`
+items directly (same ids/order/category as before, so this is a no-op for
+anyone using the menu) — same pattern as the AdvancedSkeleton/
+UkoreReferenceEditor/ShotSplitter splits above.
+`UkoreMaya/core/menu_utils.py`'s corresponding wrapper functions were
+removed too.
+
 MayaToolkit — UkoreHub's own vendored Maya scripts and plug-ins (Renamer,
 RigBox, WeightPuller, `tmlib`, `UkoreMaya`, and friends, under
 `maya-scripts/`), plus compiled plug-ins under `maya-plug-ins/`. Unchanged

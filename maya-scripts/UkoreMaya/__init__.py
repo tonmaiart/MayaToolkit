@@ -41,13 +41,6 @@ try:
             label="Save Increment",
             category="General",
             command="import UkoreMaya; from UkoreMaya.core import menu_utils; menu_utils.save_increment()",
-            order=20,
-        ),
-        MenuItemSpec(
-            id="fix_sound_offset",
-            label="Fix Sound Offset",
-            category="General",
-            command="import UkoreMaya; from UkoreMaya.library import fix_sound_offset; fix_sound_offset.fix_sound_offset()",
             order=40,
         ),
         MenuItemSpec(
@@ -56,6 +49,14 @@ try:
             category="General",
             command="import UkoreMaya; from UkoreMaya.core import menu_utils; menu_utils.revert_file()",
             order=50,
+            divider_after=True,
+        ),
+        MenuItemSpec(
+            id="fix_sound_offset",
+            label="Fix Sound Offset",
+            category="General",
+            command="import UkoreMaya; from UkoreMaya.library import fix_sound_offset; fix_sound_offset.fix_sound_offset()",
+            order=70,
         ),
 
         # --- Selection (submenu: "Common", order 100s) ---
@@ -132,20 +133,15 @@ try:
         ),
 
         # --- Common (submenu: "Common", order 200s) ---
-        MenuItemSpec(
-            id="renamer",
-            label="Renamer",
-            category="Common",
-            command="import UkoreMaya; from UkoreMaya.core import menu_utils; menu_utils.renamer()",
-            order=210,
-        ),
-        MenuItemSpec(
-            id="attribute_tool",
-            label="Attribute",
-            category="Common",
-            command="import UkoreMaya; from UkoreMaya.core import menu_utils; menu_utils.attribute()",
-            order=220,
-        ),
+        # "renamer"/"attribute_tool" used to be registered here via
+        # menu_utils.renamer()/attribute() — removed 2026-08-31.
+        # RigToolkit now registers both, independent of MayaToolkit: its own
+        # plugin.py contributes its own launch_hooks entry (`import
+        # UkoreRigToolkit`), and its own UkoreRigToolkit/__init__.py
+        # registers the same "renamer"/"attribute_tool" UkoreMenu items
+        # directly (same ids/order/category as before, so this is a no-op
+        # for anyone using the menu). Keeping a second copy here would have
+        # duplicate-registered the same ids into UkoreMenu's registry.
         MenuItemSpec(
             id="reset_transform",
             label="Reset Transform",
@@ -227,41 +223,16 @@ try:
         ),
 
         # --- Rig (submenu: "Rig") ---
-        MenuItemSpec(
-            id="local_script",
-            label="Local Script...",
-            category="Rig",
-            command="import UkoreMaya; from UkoreMaya.core import menu_utils; menu_utils.python_reader()",
-            order=10,
-        ),
-        MenuItemSpec(
-            id="quick_data",
-            label="Quick Data",
-            category="Rig",
-            command="import UkoreMaya; from UkoreMaya.core import menu_utils; menu_utils.quickdata()",
-            order=20,
-        ),
-        MenuItemSpec(
-            id="easy_controller",
-            label="Easy Controller",
-            category="Rig",
-            command="import UkoreMaya; from UkoreMaya.core import menu_utils; menu_utils.easy_controller()",
-            order=30,
-        ),
-        MenuItemSpec(
-            id="snapper",
-            label="Snapper",
-            category="Rig",
-            command="import UkoreMaya; from UkoreMaya.core import menu_utils; menu_utils.snapper()",
-            order=40,
-        ),
-        MenuItemSpec(
-            id="weight_puller",
-            label="Weight Puller",
-            category="Rig",
-            command="import UkoreMaya; from UkoreMaya.core import menu_utils; menu_utils.weight_puller()",
-            order=50,
-        ),
+        # "local_script"/"quick_data"/"easy_controller"/"snapper"/
+        # "weight_puller" used to be registered here via
+        # menu_utils.python_reader()/quickdata()/easy_controller()/snapper()/
+        # weight_puller() — removed 2026-08-31. RigToolkit now registers all
+        # five, independent of MayaToolkit: its own plugin.py contributes
+        # its own launch_hooks entry (`import UkoreRigToolkit`), and its own
+        # UkoreRigToolkit/__init__.py registers the same ids/order/category
+        # directly (still under Rig, orders 10/20/30/40/50, so this is a
+        # no-op for anyone using the menu). Keeping a second copy here would
+        # have duplicate-registered those ids into UkoreMenu's registry.
         # AdvancedSkeleton's "Advanced Skeleton"/"Advanced Skeleton Face" menu
         # items used to be dispatched from here via menu_utils.run_advanced()/
         # run_advanced_face() — removed 2026-08-27. ukore_advanced_skeleton

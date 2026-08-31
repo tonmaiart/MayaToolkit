@@ -5,9 +5,6 @@ from tmlib.core import File
 # ------------- File Launchers -------------------
 
 
-def python_reader():
-    File.launch("PythonReader")
-
 def maya_file_browser():
     File.launch("UkoreBrowser")
 
@@ -16,39 +13,20 @@ def publish_browser():
     File.launch("PublishBrowser")
 
 
-def renamer():
-    File.launch("Renamer")
-
-
-def attribute():
-    File.launch("Attribute")
-
-
-def quickdata():
-    File.launch("QuickData")
-
-
-def easy_controller():
-    File.launch("EasyController")
+# python_reader()/renamer()/attribute()/quickdata()/easy_controller()/
+# snapper()/weight_puller() moved to
+# cache/plugins/RigToolkit/UkoreRigToolkit/__init__.py on 2026-08-31 —
+# RigToolkit now owns both the toolkit implementations and their menu
+# registration instead of going through MayaToolkit, see that plugin's
+# README.
 
 
 def advanced_control():
     File.launch("AdvancedControl")
 
 
-def snapper():
-    File.launch("Snapper")
-
-
-def weight_puller():
-    File.launch("WeightPuller")
-
-
 def cfx_tools():
     File.launch("CFXTools")
-
-def quick_script():
-    File.launch("PythonReader")
 
 
 # ------------- Scene ----------------------------
