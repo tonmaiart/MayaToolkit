@@ -17,6 +17,9 @@ def save_increment():
     available version (e.g., if _v003 exists, it saves _v004) even if
     lower versions are missing.
 
+    Shows a confirm dialog stating the current version and the new version
+    before saving; returns None without saving if the user cancels.
+
     Returns:
         str: The full path of the newly saved file, or None if the file wasn't saved.
     """
@@ -27,6 +30,13 @@ def save_increment():
 
     directory, filename = os.path.split(current_path)
     name_base, ext = os.path.splitext(filename)
+
+    current_version_match = re.match(r"^.*_v(\d+)$", name_base)
+    current_version_str = (
+        "v{:03d}".format(int(current_version_match.group(1)))
+        if current_version_match
+        else "(unsaved version)"
+    )
 
     if "_v" in name_base:
         name_base = name_base.rsplit("_v", 1)[0]
@@ -46,6 +56,20 @@ def save_increment():
 
     new_name = f"{name_base}_v{version:03d}{ext}"
     new_path = os.path.join(directory, new_name)
+
+    confirm = cmds.confirmDialog(
+        title="Save Increment",
+        message="Save new version:\n\n{} → v{:03d}\n\nNew file:\n{}".format(
+            current_version_str, version, new_name
+        ),
+        button=["Save", "Cancel"],
+        defaultButton="Save",
+        cancelButton="Cancel",
+        dismissString="Cancel",
+    )
+
+    if confirm != "Save":
+        return None
 
     cmds.file(rename=new_path)
     cmds.file(save=True, type="mayaAscii" if ext == ".ma" else "mayaBinary")
