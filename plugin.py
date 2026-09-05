@@ -21,6 +21,14 @@ def register(api) -> None:
     contributions = bridge.get("contributions", {})
     contributions[TOOL_ID] = {
         "PYTHONPATH": {ANY_VERSION: [str(tool_root / "maya-scripts")]},
+        # LedFaceCapture (prototype, see maya-scripts/LedFaceCapture/README.md)
+        # force-loads via maya_launcher's MAYA_PLUG_IN_PATH scan. Only its
+        # thin maya-plug-ins/led_face_capture.py entry stub lives in this
+        # directory on purpose -- the scan force-loads every .py it finds
+        # here, and the package's other modules aren't standalone plug-ins.
+        "MAYA_PLUG_IN_PATH": {
+            ANY_VERSION: [str(tool_root / "maya-scripts" / "LedFaceCapture" / "maya-plug-ins")],
+        },
     }
     bridge.set("contributions", contributions)
     labels = bridge.get("labels", {})
