@@ -7,7 +7,13 @@ pipeline.
 """
 from __future__ import annotations
 
+import maya.api.OpenMaya as om2
 import maya.api.OpenMayaRender as omr
+import maya.cmds as cmds
+
+from . import _debug
+
+_LED_FACE_MATERIAL_TYPE = "ledFaceMaterial"
 
 # maya.api.OpenMayaRender has no standalone MRasterFormat class (confirmed
 # absent from dir(omr), dir(MRenderTargetDescription), and the old-style
@@ -68,6 +74,34 @@ def push_frame(name, width, height, rgba_bytes):
         texture_manager.releaseTexture(old_entry.texture)
 
     _ENTRIES[name] = _Entry(new_texture, width, height)
+    _mark_consumers_dirty(name)
+
+
+def _mark_consumers_dirty(name):
+    """Nothing about pushing a new frame here touches Maya's own dependency
+    graph, so VP2 has no reason to think ledFaceMaterial needs its
+    updateDevice() called again -- confirmed on Maya 2026: updateDevice()
+    fired exactly once, right when the override first activated (with no
+    texture registered yet), and never again despite postSceneRender pushing
+    fresh frames every redraw after that. cmds.dgdirty() on every
+    ledFaceMaterial node using this texture name is the standard Maya way to
+    say "something you depend on changed, re-evaluate" -- untested from
+    inside a render callback (which may run off Maya's main thread, the same
+    class of risk that ruled out MGlobal.displayError elsewhere in this
+    package) so this is wrapped defensively; if it turns out to be unsafe
+    here, the fix is to drive this from a main-thread idle callback instead
+    of from postSceneRender directly.
+    """
+    try:
+        iterator = om2.MItDependencyNodes(om2.MFn.kPluginDependNode)
+        while not iterator.isDone():
+            node_fn = om2.MFnDependencyNode(iterator.thisNode())
+            if node_fn.typeName == _LED_FACE_MATERIAL_TYPE:
+                if node_fn.findPlug("textureName", False).asString() == name:
+                    cmds.dgdirty(node_fn.name())
+            iterator.next()
+    except Exception:
+        _debug.log_exception("texture_registry._mark_consumers_dirty")
 
 
 def get_texture(name):
