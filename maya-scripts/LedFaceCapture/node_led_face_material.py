@@ -18,6 +18,7 @@ from __future__ import annotations
 import maya.api.OpenMaya as om2
 import maya.api.OpenMayaRender as omr
 
+from . import _debug
 from . import texture_registry
 
 NODE_NAME = "ledFaceMaterial"
@@ -74,37 +75,59 @@ class LedFaceShaderOverride(omr.MPxShaderOverride):
     def __init__(self, obj):
         omr.MPxShaderOverride.__init__(self, obj)
         self._shader_instance = None
+        # MPxShaderOverride has no .object() accessor (that's an MPxNode
+        # thing) -- the node's MObject only ever reaches us as a parameter,
+        # via creator()/updateDG(), so we have to hold onto it ourselves.
+        self._node_obj = obj
 
     def initialize(self, obj):
-        shader_mgr = omr.MRenderer.getShaderManager()
-        if shader_mgr is None:
+        print("LedFaceCapture: LedFaceShaderOverride.initialize() called")
+        try:
+            shader_mgr = omr.MRenderer.getShaderManager()
+            if shader_mgr is None:
+                return None
+            # k3dSolidTextureShader = stock unlit textured shader. The Python
+            # API flattens this enum directly onto MShaderManager itself (no
+            # nested .MStockShader), unlike the C++
+            # MShaderManager::MStockShader path. If this member doesn't exist
+            # in your Maya version, run
+            #   [s for s in dir(omr.MShaderManager) if "texture" in s.lower()]
+            # in the Script Editor and swap in whatever it reports.
+            self._shader_instance = shader_mgr.getStockShader(
+                omr.MShaderManager.k3dSolidTextureShader
+            )
+            return self._shader_instance
+        except Exception:
+            _debug.log_exception("initialize")
             return None
-        # k3dSolidTextureShader = stock unlit textured shader. If this enum
-        # member doesn't exist in your Maya version, run
-        #   [s for s in dir(omr.MShaderManager.MStockShader) if "texture" in s.lower()]
-        # in the Script Editor and swap in whatever it reports.
-        self._shader_instance = shader_mgr.getStockShader(
-            omr.MShaderManager.MStockShader.k3dSolidTextureShader
-        )
-        return self._shader_instance
 
     def updateDG(self, obj):
-        pass
+        # Called each refresh with the current, guaranteed-valid MObject for
+        # this node -- refresh our stored reference here rather than trusting
+        # the one captured at construction time, in case that one went stale
+        # (e.g. after an undo/redo recreated the node).
+        self._node_obj = obj
 
     def updateDevice(self):
-        if self._shader_instance is None:
-            return
-        node_fn = om2.MFnDependencyNode(self.object())
-        texture_name = node_fn.findPlug("textureName", False).asString()
-        texture = texture_registry.get_texture(texture_name)
-        if texture is None:
-            return
-        assignment = omr.MTextureAssignment()
-        assignment.texture = texture
-        # "map" is k3dSolidTextureShader's texture parameter name. If binding
-        # silently has no visible effect, inspect
-        # self._shader_instance.parameterList() to confirm the real name.
-        self._shader_instance.setParameter("map", assignment)
+        print("LedFaceCapture: LedFaceShaderOverride.updateDevice() called, shader_instance =", self._shader_instance)
+        try:
+            if self._shader_instance is None:
+                return
+            node_fn = om2.MFnDependencyNode(self._node_obj)
+            texture_name = node_fn.findPlug("textureName", False).asString()
+            texture = texture_registry.get_texture(texture_name)
+            print("LedFaceCapture: updateDevice -- textureName =", repr(texture_name), "texture =", texture)
+            if texture is None:
+                return
+            assignment = omr.MTextureAssignment()
+            assignment.texture = texture
+            # "map" is k3dSolidTextureShader's texture parameter name. If
+            # binding silently has no visible effect, inspect
+            # self._shader_instance.parameterList() to confirm the real name.
+            self._shader_instance.setParameter("map", assignment)
+            print("LedFaceCapture: updateDevice -- setParameter('map', ...) called")
+        except Exception:
+            _debug.log_exception("updateDevice")
 
     def handlesDraw(self, context):
         return False

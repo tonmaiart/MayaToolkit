@@ -12,8 +12,24 @@ errors).
 
 All real logic lives in LedFaceCapture/led_face_capture_plugin.py; this file
 just re-exports what Maya's plug-in loader looks for.
+
+Maya's plug-in loader only guarantees a fresh re-exec of *this* file on
+unloadPlugin/loadPlugin -- it does not know to evict the LedFaceCapture.*
+submodules (node_led_face_material, render_override, texture_registry, ...)
+from Python's own sys.modules cache. Left alone, `from LedFaceCapture.x
+import y` below would silently hand back whatever was imported on the very
+first load, no matter how many times the package's .py files are edited and
+the plugin force-unloaded/reloaded afterward -- which is exactly what made
+several fixes upstream appear to have "no effect". Purging every
+LedFaceCapture.* entry before importing forces a genuine re-read from disk
+on every single loadPlugin call.
 """
 from __future__ import annotations
+
+import sys
+
+for _mod_name in [n for n in sys.modules if n == "LedFaceCapture" or n.startswith("LedFaceCapture.")]:
+    del sys.modules[_mod_name]
 
 from LedFaceCapture.led_face_capture_plugin import (
     maya_useNewAPI,

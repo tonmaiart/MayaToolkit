@@ -9,6 +9,16 @@ from __future__ import annotations
 
 import maya.api.OpenMayaRender as omr
 
+# maya.api.OpenMayaRender has no standalone MRasterFormat class (confirmed
+# absent from dir(omr), dir(MRenderTargetDescription), and the old-style
+# maya.OpenMayaRender module) -- MRenderTargetDescription.setRasterFormat()/
+# MTextureDescription.fFormat both just take a plain int, per
+# help(omr.MRenderTargetDescription.setRasterFormat). The named constants
+# turned out to live as flat attributes directly on MRenderer instead
+# (confirmed via dir(omr.MRenderer): kR8G8B8A8_UNORM, kB8G8R8A8, etc. are all
+# there) -- no guessing needed once you know to look there.
+RASTER_FORMAT_R8G8B8A8_UNORM = omr.MRenderer.kR8G8B8A8_UNORM
+
 
 class _Entry(object):
     __slots__ = ("texture", "width", "height")
@@ -45,7 +55,7 @@ def push_frame(name, width, height, rgba_bytes):
     desc.setToDefault2DTexture()
     desc.fWidth = width
     desc.fHeight = height
-    desc.fFormat = omr.MRasterFormat.kR8G8B8A8_UNORM
+    desc.fFormat = RASTER_FORMAT_R8G8B8A8_UNORM
 
     # Passing "" as the name asks Maya not to cache/dedupe by name, since we
     # intentionally want a brand new resource every call.

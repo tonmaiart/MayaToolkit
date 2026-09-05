@@ -13,6 +13,9 @@ or via the package helper once maya-scripts/ is already on PYTHONPATH
 """
 from __future__ import annotations
 
+import time
+from pathlib import Path
+
 # Maya's plug-in loader execs this specific file outside the normal package
 # import machinery, so `__name__`/`__package__` are never set here and a
 # relative `from . import ...` raises KeyError('__name__' not in globals).
@@ -33,6 +36,22 @@ maya_useNewAPI = True
 _override_instance = None
 
 
+def _compute_build_stamp():
+    """Latest mtime across every .py in the package -- changes automatically
+    whenever any of them is edited, so there's never a stale hand-written
+    version number to forget to bump. Printed on load so a reload can be
+    confirmed as having actually picked up the newest edit.
+    """
+    package_dir = Path(__file__).resolve().parent
+    latest = 0.0
+    for py_file in package_dir.glob("*.py"):
+        latest = max(latest, py_file.stat().st_mtime)
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(latest))
+
+
+BUILD_STAMP = _compute_build_stamp()
+
+
 def initializePlugin(plugin_obj):
     plugin_fn = om2.MFnPlugin(plugin_obj, "UkoreHub", "0.1.0-prototype", "Any")
 
@@ -43,15 +62,31 @@ def initializePlugin(plugin_obj):
     _override_instance = LedFaceCaptureOverride()
     omr.MRenderer.registerOverride(_override_instance)
 
+    om2.MGlobal.displayInfo("LedFaceCapture loaded -- build {}".format(BUILD_STAMP))
+
 
 def uninitializePlugin(plugin_obj):
+    # Each step runs independently: a failure in one (e.g. a wrong API method
+    # name) must not skip the rest, or a leftover node/override registration
+    # will collide with the next loadPlugin's registerNode/registerOverride
+    # call (this is exactly how a single AttributeError here previously
+    # cascaded into "Cannot find item of required type" on reload).
     global _override_instance
     if _override_instance is not None:
-        omr.MRenderer.unregisterOverride(_override_instance)
+        try:
+            omr.MRenderer.deregisterOverride(_override_instance)
+        except Exception:
+            om2.MGlobal.displayWarning("LedFaceCapture: failed to deregister render override.")
         _override_instance = None
 
     texture_registry.clear()
 
     plugin_fn = om2.MFnPlugin(plugin_obj)
-    node_led_face_material.deregister(plugin_fn)
-    node_led_capture_config.deregister(plugin_fn)
+    try:
+        node_led_face_material.deregister(plugin_fn)
+    except Exception:
+        om2.MGlobal.displayWarning("LedFaceCapture: failed to deregister ledFaceMaterial.")
+    try:
+        node_led_capture_config.deregister(plugin_fn)
+    except Exception:
+        om2.MGlobal.displayWarning("LedFaceCapture: failed to deregister ledCaptureConfig.")
