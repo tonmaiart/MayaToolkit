@@ -82,11 +82,18 @@ def _build_config(camera_transform, capture_set):
 
 
 def _build_material_and_preview():
-    shader = cmds.shadingNode("ledFaceMaterial", asShader=True, name=_name("mat"))
+    # ledFaceMaterial is a utility node now (MPxSurfaceShadingNodeOverride),
+    # feeding a real lambert's color rather than acting as the surfaceShader
+    # itself -- the lambert is what Maya actually knows how to draw
+    # correctly; ledFaceMaterial only needs to contribute one input to it.
+    shader = cmds.shadingNode("ledFaceMaterial", asUtility=True, name=_name("mat"))
     cmds.setAttr(shader + ".textureName", TEXTURE_NAME, type="string")
 
-    sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name=shader + "SG")
-    cmds.connectAttr(shader + ".outColor", sg + ".surfaceShader", force=True)
+    lambert = cmds.shadingNode("lambert", asShader=True, name=_name("lambert"))
+    cmds.connectAttr(shader + ".outColor", lambert + ".color", force=True)
+
+    sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name=lambert + "SG")
+    cmds.connectAttr(lambert + ".outColor", sg + ".surfaceShader", force=True)
 
     preview_plane, _ = cmds.polyPlane(name=_name("previewPlane"), width=4, height=4, subdivisionsX=1, subdivisionsY=1)
     cmds.setAttr(preview_plane + ".rotateX", 90)  # face +Z, same side as the capture camera

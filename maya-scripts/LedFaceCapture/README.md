@@ -2,9 +2,52 @@
 
 RAM-only render-to-texture pipeline: an ortho camera captures a boolean LED
 rig every viewport refresh, the pixels stay in memory (render target -> RAM
-bytes -> `MTexture`), and a Viewport 2.0 shader override rebinds that texture
+bytes -> `MTexture`), and a Viewport 2.0 shading override rebinds that texture
 live on a real model's face. No `file` texture node, no image ever written to
 disk, no bake step.
+
+## Architecture change: `MPxShaderOverride` -> `MPxSurfaceShadingNodeOverride`
+
+`node_led_face_material.py` was rewritten from scratch partway through this
+prototype's debugging history. The original design made `ledFaceMaterial` a
+full replacement surface shader (`MPxShaderOverride`, classification
+`drawdb/shader/surface/...`, assigned straight to a shading engine's
+`surfaceShader`). That was abandoned after fixing every discoverable issue
+(`shaderInstance()` was never overridden -- the actual root cause of a long
+chain of "no error anywhere, texture confirmed bound via
+updateDevice()/setParameter(), still renders fully transparent" symptoms --
+plus several stock-shader/parameter-binding details) and the render item
+*still* refused to draw anything, not even a hardcoded solid color, while a
+plain `lambert` on the same mesh rendered correctly in the same viewport.
+
+The current design instead makes `ledFaceMaterial` a **utility node**
+(`MPxSurfaceShadingNodeOverride`, classification
+`drawdb/shader/operation/...`) that feeds a real `lambert`'s `.color`, rather
+than replacing the whole shader. The lambert is what Maya already knows how
+to draw correctly (confirmed directly: assigning a plain red lambert to the
+same test mesh displayed immediately) -- `ledFaceMaterial` only has to
+contribute one input to an otherwise-working shading network via a custom
+draw *fragment* (`MFragmentManager`), a much smaller surface to get wrong
+than being the entire shader.
+
+**Everything below about `render_override.py`/`texture_registry.py` (the
+capture pipeline: camera, object-set restriction, offscreen render target,
+`ctypes` readback, `MTexture` creation) is unaffected by this change and
+still accurate** -- confirmed working end to end via diagnostics before this
+rewrite started. Only the shader-specific findings below (stock shader
+parameter names, `shaderInstance()`, etc.) describe the abandoned
+`MPxShaderOverride` design; kept for the record in case that path is ever
+revisited, not because they still describe live code.
+
+**Phase 1 of the new design** (current state of `node_led_face_material.py`)
+registers a fragment that ignores `textureName`/the capture texture entirely
+and outputs a hardcoded solid red -- to validate that
+`MPxSurfaceShadingNodeOverride` + a from-scratch fragment can draw *anything*
+on this Maya version before reintroducing texture sampling. The fragment XML
+schema is reconstructed from memory/pattern, not looked up live via any
+`help()`/`dir()` (there's no equivalent introspection for XML schema) --
+expect to iterate against whatever Maya reports on first load, the same way
+every fix above this point was found.
 
 ## Reload gotcha (read this if a fix "doesn't seem to take effect")
 
@@ -194,6 +237,51 @@ each is to need a fix:
    None` on every call after the first). Fixed: `setup()` now reuses the
    existing `_CaptureSceneRender` instance across calls and only refreshes
    its `_config_node_fn` reference.
+2g. **`texture_registry.py`: `updateDevice()` only ever fires once, before
+   any frame is ever pushed -- EXPERIMENTAL FIX, untested at time of
+   writing.** Confirmed on Maya 2026: with the capture pipeline fully
+   working end to end (`postSceneRender` pushing a fresh frame every redraw,
+   no exceptions anywhere), `LedFaceShaderOverride.updateDevice()` still only
+   printed once, right as the override first activated (with
+   `texture_registry` still empty), and never again despite dozens of
+   subsequent `postSceneRender` calls. Root cause: nothing about
+   `push_frame()` touches Maya's own dependency graph, so VP2 has no signal
+   that `ledFaceMaterial` needs re-evaluating -- the shader's own attributes
+   never change, only an external Python dict does. `push_frame()` now calls
+   `_mark_consumers_dirty()`, which finds every `ledFaceMaterial` node whose
+   `textureName` matches and calls `cmds.dgdirty()` on it. **This is
+   unverified** -- `cmds.dgdirty()` from inside a render callback that may
+   run off Maya's main thread is exactly the class of call that ruled out
+   `MGlobal.displayError` elsewhere in this package (see `_debug.py`). If it
+   introduces a new unattributable error (watch for the "string or unicode
+   object expected" pattern), the fix is to drive the dirty-marking from a
+   main-thread idle callback (`om2.MEventMessage.addEventCallback("idle",
+   ...)` or similar) instead of calling it directly from `postSceneRender`.
+2h. ~~**`node_led_face_material.py`: never overrode `shaderInstance()`**~~ --
+   **THE root cause of the entire "no error anywhere, capture pipeline
+   fully confirmed working end to end, texture successfully bound via
+   updateDevice()/setParameter(), yet the preview plane stays completely
+   transparent under both the custom override AND stock Viewport 2.0"
+   saga.** Confirmed via `help(omr.MPxShaderOverride.shaderInstance)`: *"The
+   default implementation returns None indicating that no shader instance
+   will be used. Override this method if a shader instance is to be used
+   for drawing."* This class only ever implemented `initialize()`, on the
+   (reasonable-looking, completely wrong) assumption that whatever it
+   returned became the shader Maya draws with. `help()` on `initialize` also
+   showed its real signature is `initialize(shader) -> string` or
+   `initialize(initContext, initFeedback) -> string` -- returning an
+   `MShaderInstance` from an `initialize(self, obj)` matching neither
+   overload meant it was never doing what it looked like it was doing
+   either. Every prior confirmation that `updateDevice()`/`setParameter()`
+   "worked" was real -- they were just configuring a shader instance Maya
+   was never told to actually draw with. Fixed: shader instance construction
+   moved to `__init__`/`_build_shader_instance()`, `shaderInstance()` now
+   returns it, and `initialize()` just forwards to the base implementation.
+   **Diagnosis method worth reusing for anything that still misbehaves**:
+   `dir()` the base class, cross-check every name against what's
+   implemented, then `help()` the specific method for its *real* signature
+   and semantics -- this is exactly how `targetOverrideList` (vs the
+   nonexistent `renderTargets`) was found earlier too.
 3. ~~**`render_override.py`: `objectSetOverride`**~~ -- **confirmed wrong on
    Maya 2026**: `Error: MSelectionList expected` as soon as the override was
    enabled. It wants an `MSelectionList`, not the set's bare `MObject`.
