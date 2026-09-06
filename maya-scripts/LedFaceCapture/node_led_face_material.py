@@ -140,9 +140,20 @@ vec4 ledFaceCaptureFragmentImpl()
 def _ensure_fragment_registered():
     try:
         frag_mgr = omr.MRenderer.getFragmentManager()
+        print("LedFaceCapture: getFragmentManager() ->", frag_mgr)
         if frag_mgr is None:
+            print("LedFaceCapture: no fragment manager -- fragment NEVER registered")
             return False
-        if frag_mgr.hasFragment(FRAGMENT_NAME):
+        already_has_it = frag_mgr.hasFragment(FRAGMENT_NAME)
+        print("LedFaceCapture: hasFragment(%r) -> %r" % (FRAGMENT_NAME, already_has_it))
+        if already_has_it:
+            print(
+                "LedFaceCapture: skipping addShadeFragmentFromBuffer -- a fragment "
+                "with this name is already registered (could be a stale one from "
+                "an earlier session/process if its content doesn't match the "
+                "current type=\"plumbing\" XML below)"
+            )
+            print("LedFaceCapture: live fragment XML ->", frag_mgr.getFragmentXML(FRAGMENT_NAME))
             return True
         registered_name = frag_mgr.addShadeFragmentFromBuffer(_FRAGMENT_XML.encode("utf-8"), False)
         print("LedFaceCapture: fragment registration returned", repr(registered_name))
@@ -211,6 +222,7 @@ class LedFaceShadingNodeOverride(omr.MPxShadingNodeOverride):
         omr.MPxShadingNodeOverride.__init__(self, obj)
 
     def fragmentName(self):
+        print("LedFaceCapture: LedFaceShadingNodeOverride.fragmentName() called")
         return FRAGMENT_NAME
 
     def outputForConnection(self, source_plug, destination_plug):
@@ -219,10 +231,15 @@ class LedFaceShadingNodeOverride(omr.MPxShadingNodeOverride):
         # confirmed via help() that a mismatch here means "the fragment will
         # not be connected to the overall shading effect" at all, which
         # produces exactly a solid-black render item with no error anywhere.
+        print(
+            "LedFaceCapture: outputForConnection() called, source=%r dest=%r"
+            % (source_plug, destination_plug)
+        )
         return FRAGMENT_NAME
 
 
 def register(plugin_fn):
+    print("LedFaceCapture: node_led_face_material.register() running, classification =", NODE_CLASSIFICATION)
     plugin_fn.registerNode(
         NODE_NAME,
         LedFaceMaterial.id,
@@ -235,6 +252,7 @@ def register(plugin_fn):
     omr.MDrawRegistry.registerShadingNodeOverrideCreator(
         DRAW_REGISTRY_KEY, DRAW_REGISTRANT_ID, LedFaceShadingNodeOverride.creator
     )
+    print("LedFaceCapture: registerShadingNodeOverrideCreator done for", DRAW_REGISTRY_KEY)
 
 
 def deregister(plugin_fn):

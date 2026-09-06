@@ -1,5 +1,71 @@
 # LedFaceCapture (prototype, v0)
 
+## SESSION PAUSED HERE -- read this first before resuming
+
+**Status right now**: the capture pipeline (camera -> offscreen render
+target -> `ctypes` readback -> `MTexture` in RAM, all in
+`render_override.py`/`texture_registry.py`) is **fully confirmed working**,
+verified via unconditional `print()` diagnostics on every callback -- no
+open questions there. `node_led_face_material.py` (the piece that puts a
+result on screen) is **not yet working**: the test preview plane renders
+**solid black** with no error anywhere, through several fix attempts.
+
+**What's been tried on `node_led_face_material.py`, in order, all confirmed
+via direct testing on Maya 2026 (not guesses)**:
+1. `MPxShaderOverride` (node = the whole surface shader) -- abandoned after
+   fixing `shaderInstance()` (the real root cause of that path's symptoms)
+   and it still rendered nothing, not even a hardcoded color.
+2. Pivoted to `MPxSurfaceShadingNodeOverride` (node = a utility feeding a
+   real `lambert.color`) -- rendered solid black instead of transparent
+   (progress: something draws now), through: fixing `addShadeFragmentFromBuffer`
+   needing `bytes` not `str`; fixing the fragment XML schema (confirmed
+   against Maya's own built-in `mayaSolidColor` and `mayaRedFromColor4`
+   fragments, dumped live via `getFragmentXML()`); fixing `outputForConnection`
+   (default returns our node's attribute name "outColor", not the fragment's
+   output parameter name -- doc-confirmed via Autodesk's own reference).
+   Still black.
+3. Found via Autodesk's own docs that `MPxSurfaceShadingNodeOverride` is
+   specifically for a node "connected directly to a Maya shading engine" --
+   i.e. a complete standalone shader -- not a utility feeding another
+   shader's input. Switched to plain `MPxShadingNodeOverride` +
+   `MDrawRegistry.registerShadingNodeOverrideCreator` (a genuinely separate
+   registration function from the Surface one, confirmed via `dir()`).
+   Still black.
+4. Found via `cmds.getClassification("multiplyDivide")` /
+   `("condition")` that real Maya utility nodes carry a *combined*
+   classification string (`"drawdb/shader/operation/<node>:utility/general"`),
+   not just the drawdb path alone -- ours was missing the `:utility/general`
+   suffix. Fixed (`NODE_CLASSIFICATION` vs `DRAW_REGISTRY_KEY` are now two
+   separate constants; see top of `node_led_face_material.py`). **Still
+   black** -- this was the last thing tried before pausing.
+
+**Next thing to try, before writing any more code**: everything above was
+tested via `File > New` + `unloadPlugin`/`loadPlugin` cycles, **never a full
+Maya process restart**, in a session that had already been through many
+render-target and node-registration states. The exact same class of bug hit
+earlier in this prototype (leaked GPU render targets surviving `File > New`
+because they're process-level, not scene-level -- see the "2d-3" entry
+further down) may apply here too: Maya's VP2 shading-fragment-graph
+compilation for a given node *type* could plausibly be cached at the
+process level and never invalidated by a plugin reload. **First step in the
+next session: fully quit Maya, reopen via UkoreHub, then rerun
+`dev_smoke_test.py` with no other code changes** and see if the classification
+fix from step 4 finally shows something other than black on a guaranteed-
+clean process. Only start changing code again if it's still black after
+that.
+
+If it's still black after a real restart, the next things to check, roughly
+in order of suspicion: (a) whether `outputForConnection`/`fragmentName` are
+actually being *called* at all for this override (add unconditional
+`print()`s at their top, same technique used throughout this file's
+history, and confirm via the Script Editor); (b) whether
+`getCustomMappings()` needs an explicit override even with zero properties;
+(c) trying the fragment with one dummy input property (mirroring
+`mayaRedFromColor4`'s single `C_4F` property) in case a zero-property
+plumbing fragment is handled specially/incorrectly by Maya's graph builder.
+
+
+
 RAM-only render-to-texture pipeline: an ortho camera captures a boolean LED
 rig every viewport refresh, the pixels stay in memory (render target -> RAM
 bytes -> `MTexture`), and a Viewport 2.0 shading override rebinds that texture
