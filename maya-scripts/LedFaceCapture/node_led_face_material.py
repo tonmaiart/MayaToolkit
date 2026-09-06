@@ -25,13 +25,34 @@ to the shading engine):
     cmds.connectAttr(lam + ".outColor", sg + ".surfaceShader")
     cmds.sets("robotHeadFaceMesh", edit=True, forceElement=sg)
 
-Phase 1 (current): the registered fragment ignores `textureName`/the capture
-texture entirely and just outputs a hardcoded solid red, to validate that
-MPxSurfaceShadingNodeOverride + a from-scratch fragment can draw *anything*
-on this Maya version before reintroducing texture sampling. The fragment XML
-schema below is reconstructed from memory/pattern, not looked up live --
-expect to iterate on it against whatever error (if any) Maya reports on
-first load.
+Phase 1 (confirmed working end to end on Maya 2026): a hardcoded-solid-red
+fragment, ignoring `textureName`/the capture texture entirely, proved that
+MPxShadingNodeOverride + a from-scratch fragment can draw *anything* at all
+through a real lambert, under both stock Viewport 2.0 and LedFaceCaptureOverride.
+Root cause of every prior "no error anywhere, still black" symptom (across
+all three abandoned architectures) turned out to be a **type mismatch**: the
+fragment's `<outputs>` declared a `float4`, but `ledFaceMaterial.outColor` is
+a 3-component color attribute (`MFnNumericAttribute.createColor()`) -- Maya
+silently refuses to splice a mismatched-arity fragment output into the
+shading effect, the same "no error, just doesn't connect" failure mode as
+the outputForConnection() name-mismatch case. Fixed by declaring `float3`
+outputs/return types throughout. Also fixed in the same pass:
+`NODE_CLASSIFICATION`'s Hypershade category was `:utility/general` (copied
+from `multiplyDivide`/`condition`, which are math/sampling utilities), but
+node that actually produce a color fed into another shader's color input --
+`blendColors`/`clamp`/`remapColor`/`gammaCorrect` -- are all `:utility/color`
+instead; changed to match.
+
+Phase 2 (current): reintroducing texture sampling. The fragment now takes a
+`map`/`mapSampler` texture property plus a `uvCoord` input (matched to the
+mesh's UV set via the `mayaUvCoordSemantic` semantic) and samples it instead
+of returning a hardcoded color. `updateDG()` caches the node's `textureName`
+attribute (DG access is only safe there, never in updateShader()/render
+callbacks); `updateShader()` looks up the live capture texture from
+`texture_registry` by that name and binds it onto the fragment's `map`
+parameter via `MTextureAssignment`. Unverified on first write, same as every
+other API surface in this file -- expect to iterate against whatever Maya
+reports.
 """
 from __future__ import annotations
 
@@ -39,6 +60,7 @@ import maya.api.OpenMaya as om2
 import maya.api.OpenMayaRender as omr
 
 from . import _debug
+from . import texture_registry
 
 NODE_NAME = "ledFaceMaterial"
 # TODO: same caveat as node_led_capture_config.NODE_ID -- placeholder from the
@@ -47,66 +69,93 @@ NODE_ID = om2.MTypeId(0x0011D701)
 # "operation" (a utility node contributing a value into a larger shading
 # network), not "surface" (a standalone, complete surface shader) -- matches
 # how Maya's own utility nodes are classified for VP2 draw registration.
-# The ":utility/general" suffix is required too -- confirmed via
-# cmds.getClassification("multiplyDivide") / ("condition") on Maya 2026,
-# both of which return a combined "drawdb/shader/operation/<node>:<hypershade
-# category>" string, not the drawdb path alone. Without it, our
-# classification never told Hypershade/the shading-graph builder this is a
-# real utility node at all, which is a very plausible reason the fragment
-# never got wired into lambert.color's fragment graph regardless of how
-# outputForConnection/the base override class were fixed.
+# The ":utility/general" suffix (originally copied from
+# cmds.getClassification("multiplyDivide") / ("condition")) was WRONG --
+# confirmed by comparing against nodes that actually produce a COLOR fed
+# straight into another shader's color input, the same role ledFaceMaterial
+# plays here: cmds.getClassification("blendColors")/("clamp")/("remapColor")/
+# ("gammaCorrect") all come back ":utility/color", not ":utility/general".
+# multiplyDivide/condition/samplerInfo are general math/sampling utilities,
+# not color producers, and ":utility/general" is their category, not ours --
+# this mismatch is the most likely reason Maya's shading-graph builder never
+# actually spliced our fragment into the final effect even though
+# outputForConnection() reported a correct, matching connection every time.
 DRAW_REGISTRY_KEY = "drawdb/shader/operation/ledFaceMaterial"
 # registerNode's classification param wants the FULL combined string
 # (drawdb path + Hypershade category); MDrawRegistry's registration calls
 # want just the "drawdb/..." key on its own -- keeping these as two
 # constants instead of splitting DRAW_REGISTRY_KEY out of one combined
 # string at every call site.
-NODE_CLASSIFICATION = DRAW_REGISTRY_KEY + ":utility/general"
+NODE_CLASSIFICATION = DRAW_REGISTRY_KEY + ":utility/color"
 DRAW_REGISTRANT_ID = "ledFaceMaterialRegistrant"
 
-FRAGMENT_NAME = "ledFaceCaptureFragment"
 
-# Phase 1: no inputs at all, just a hardcoded color, to isolate "can this
-# mechanism draw anything" from "can it sample our texture". Providing all
-# three of HLSL/GLSL/Cg so MFragmentManager can pick whichever matches
-# omr.MRenderer.drawAPI() -- unconfirmed whether all three blocks are
-# actually required for that selection to succeed, or whether an unused one
-# is silently ignored, or whether a missing one for the active API is a hard
-# error. First thing to try trimming if this fails to register at all.
-# Schema below is copied structurally from Maya's own built-in
-# "mayaRedFromColor4" fragment (dumped via
-# frag_mgr.getFragmentXML("mayaRedFromColor4") on Maya 2026) -- a genuine
-# `type="plumbing"` UTILITY fragment (feeds a value into another node's
-# input, same role ledFaceMaterial needs), unlike the earlier
-# "mayaSolidColor" template this was first copied from, which is
-# `type="surface"` (a complete, standalone shading result) -- registering a
-# surface-typed fragment worked (hasFragment() came back True even after
-# borrowing it directly for a live test), but it still rendered solid black
-# once connected into lambert.color, suggesting Maya may not treat a
-# surface-typed fragment's output as valid for feeding a plain color slot on
-# another shader the way a plumbing-typed one is meant to. Also matched here
-# vs. the surface-typed attempt: `feature_level="20"`, a `uiName` attribute,
-# and a `<keyword value="plumbing" />` element, none of which the earlier
-# draft had -- still no help()/dir() equivalent for XML schema, so these are
-# copied structurally rather than individually confirmed necessary.
+# Bumped from Tex5 -- Maya's MFragmentManager caches fragments by name for
+# the life of the process (confirmed live: hasFragment() kept returning True
+# and addShadeFragmentFromBuffer() was skipped even after this file's source
+# changed, so a Maya session still running from before the scaleU/scaleV
+# removal kept executing the OLD cached fragment code no matter how the
+# .py was edited). A new name forces a genuinely fresh registration instead
+# of silently testing stale GPU-side code -- bump this again any time the
+# fragment source changes and a running Maya session needs to pick it up.
+FRAGMENT_NAME = "ledFaceCaptureFragmentTex6"
+
+# Phase 2: samples a real 2D texture (bound at render time from
+# texture_registry, see updateDG()/updateShader() below) instead of the
+# phase-1 hardcoded color. `map`/`mapSampler` are plain "texture2"/"sampler"
+# properties -- MShaderInstance.setParameter() binds an MTextureAssignment/
+# MSamplerState onto them by these exact names. `uvCoord` uses the
+# "mayaUvCoordSemantic" semantic so Maya auto-feeds it from the mesh's
+# current UV set with no explicit wiring needed, the same mechanism Maya's
+# own file-texture fragments use. Output stays `float3` (see module
+# docstring -- a float4 here was the phase-1 root cause). Unverified on
+# first write: the exact per-language sampling syntax below (Texture2D+
+# sampler split for HLSL vs combined sampler2D for Cg/GLSL) is reconstructed
+# from general HLSL/GLSL/Cg conventions, not dumped from a live Maya
+# fragment -- expect to iterate against whatever Maya reports on first load.
+# Confirmed once the capture pass itself worked (non-zero lit pixels): the
+# preview plane showed the rig mirrored left-right. For an orthographic
+# camera aimed down -Z with up=+Y, "camera right" (the direction increasing
+# column index in the rendered image) is world -X, not +X (cross(up,
+# forward) with forward=(0,0,-1) works out to (-1,0,0)) -- so a texture
+# column sampled directly by the mesh's own +X-increasing U coordinate reads
+# the image backwards. Flipping the sampled U (`1.0 - uvCoord.x`) in every
+# language implementation below corrects it without touching the mesh's UVs
+# or the capture camera's orientation. Confirmed X-flip fix working; still
+# needed the same treatment on V: the render target's raw scanline order (row
+# 0 = the FIRST row Maya's rasterizer wrote, i.e. the top of the rendered
+# image) doesn't match Maya's own UV convention (v=0 at the bottom of the
+# mesh), so the untouched V coordinate read the buffer upside down. Flipping
+# `uvCoord.y` the same way fixes it.
+#
+# Phase 2.1 (removed): a manual scaleU/scaleV fragment property used to let
+# users correct capture-side aspect distortion by eye, because the actual
+# root cause (render_override.py's capture camera aspect being derived from
+# the destination viewport panel instead of the capture target's own pixel
+# dimensions) hadn't been found yet. Now that cameraOverride() sets an
+# explicit orthographic projection matrix instead, the capture itself comes
+# out undistorted and this manual per-material fudge factor is no longer
+# needed.
 _FRAGMENT_XML = """<fragment uiName="{name}" name="{name}" type="plumbing" class="ShadeFragment" version="1.0" feature_level="20">
-  <description><![CDATA[Solid-color test fragment for ledFaceMaterial (phase 1, no texture sampling yet).]]></description>
+  <description><![CDATA[Samples the live LED capture texture for ledFaceMaterial (phase 2).]]></description>
   <keyword value="plumbing" />
   <properties>
+    <float2 name="uvCoord" semantic="mayaUvCoordSemantic" flags="varyingInputParam" />
+    <texture2 name="map" />
+    <sampler name="mapSampler" />
   </properties>
-  <values>
-  </values>
   <outputs>
-    <float4 name="{name}" />
+    <float3 name="{name}" />
   </outputs>
   <implementation>
     <implementation render="OGSRenderer" language="HLSL" lang_version="11.0">
       <function_name val="ledFaceCaptureFragmentImpl" />
       <source>
         <![CDATA[
-float4 ledFaceCaptureFragmentImpl()
+float3 ledFaceCaptureFragmentImpl(float2 uvCoord, Texture2D map, sampler mapSampler)
 {{
-    return float4(1.0, 0.0, 0.0, 1.0);
+    float2 flipped = float2(uvCoord.x, 1.0 - uvCoord.y);
+    return map.Sample(mapSampler, flipped).rgb;
 }}
 ]]>
       </source>
@@ -115,9 +164,10 @@ float4 ledFaceCaptureFragmentImpl()
       <function_name val="ledFaceCaptureFragmentImpl" />
       <source>
         <![CDATA[
-float4 ledFaceCaptureFragmentImpl()
+float3 ledFaceCaptureFragmentImpl(float2 uvCoord, sampler2D map)
 {{
-    return float4(1.0, 0.0, 0.0, 1.0);
+    float2 flipped = float2(uvCoord.x, 1.0 - uvCoord.y);
+    return tex2D(map, flipped).rgb;
 }}
 ]]>
       </source>
@@ -126,9 +176,10 @@ float4 ledFaceCaptureFragmentImpl()
       <function_name val="ledFaceCaptureFragmentImpl" />
       <source>
         <![CDATA[
-vec4 ledFaceCaptureFragmentImpl()
+vec3 ledFaceCaptureFragmentImpl(vec2 uvCoord, sampler2D map)
 {{
-    return vec4(1.0, 0.0, 0.0, 1.0);
+    vec2 flipped = vec2(uvCoord.x, 1.0 - uvCoord.y);
+    return texture(map, flipped).rgb;
 }}
 ]]>
       </source>
@@ -193,9 +244,13 @@ class LedFaceMaterial(om2.MPxNode):
 
 
 class LedFaceShadingNodeOverride(omr.MPxShadingNodeOverride):
-    """Phase 1: supplies the hardcoded-red fragment for ledFaceMaterial's
-    VP2 draw. No texture_registry involvement yet -- that comes back once
-    this mechanism is confirmed to draw anything at all.
+    """Phase 2: supplies the texture-sampling fragment for ledFaceMaterial's
+    VP2 draw and binds the live texture_registry entry onto it every frame
+    via updateDG()/updateShader(). Phase 1 (hardcoded red, no
+    texture_registry involvement) confirmed the mechanism draws anything at
+    all end to end -- see the module docstring for the float3/float4 type
+    mismatch that was the real root cause of that phase's "still black"
+    symptom.
 
     Base class fixed from MPxSurfaceShadingNodeOverride to plain
     MPxShadingNodeOverride: per Autodesk's own docs (Shading Node Overrides
@@ -220,6 +275,22 @@ class LedFaceShadingNodeOverride(omr.MPxShadingNodeOverride):
 
     def __init__(self, obj):
         omr.MPxShadingNodeOverride.__init__(self, obj)
+        self._node_obj = obj
+        self._texture_name = ""
+        self._sampler_state = None
+
+    def supportedDrawAPIs(self):
+        # Never overridden before this point in the prototype's history --
+        # help(MPxShadingNodeOverride.supportedDrawAPIs) gives no "default
+        # implementation returns ..." line (every other method here that has
+        # a safe default says so explicitly), which is the same shape of gap
+        # that hid the shaderInstance() bug in the abandoned MPxShaderOverride
+        # path. If the un-overridden default reports "no APIs supported",
+        # this override would never be used to draw at all regardless of how
+        # correct the fragment/wiring is -- kAllDevices rules that out.
+        apis = omr.MRenderer.kAllDevices
+        print("LedFaceCapture: supportedDrawAPIs() called, returning", apis)
+        return apis
 
     def fragmentName(self):
         print("LedFaceCapture: LedFaceShadingNodeOverride.fragmentName() called")
@@ -231,11 +302,64 @@ class LedFaceShadingNodeOverride(omr.MPxShadingNodeOverride):
         # confirmed via help() that a mismatch here means "the fragment will
         # not be connected to the overall shading effect" at all, which
         # produces exactly a solid-black render item with no error anywhere.
+        try:
+            source_name = source_plug.name()
+        except Exception:
+            source_name = repr(source_plug)
+        try:
+            dest_name = destination_plug.name()
+        except Exception:
+            dest_name = repr(destination_plug)
         print(
-            "LedFaceCapture: outputForConnection() called, source=%r dest=%r"
-            % (source_plug, destination_plug)
+            "LedFaceCapture: outputForConnection() called, source=%s dest=%s -> returning %r"
+            % (source_name, dest_name, FRAGMENT_NAME)
         )
         return FRAGMENT_NAME
+
+    def updateDG(self):
+        # Real signature confirmed via help(omr.MPxShadingNodeOverride) --
+        # "updateDG() -> self", no obj parameter at all (unlike
+        # MPxShaderOverride.updateDG(obj), a different base class this file
+        # used before -- confirmed the hard way: Maya raised "missing 1
+        # required positional argument: 'obj'" against the first draft here).
+        # The node's MObject only ever arrives via creator(obj)/__init__(obj),
+        # cached as self._node_obj there -- reuse it instead.
+        # Only safe place to touch the dependency graph -- updateShader() is
+        # documented as an error to access the DG from (render-thread-adjacent,
+        # like every other callback in this package flagged with the same
+        # caveat). Cache textureName here; look up the actual texture in
+        # updateShader() instead.
+        try:
+            node_fn = om2.MFnDependencyNode(self._node_obj)
+            self._texture_name = node_fn.findPlug("textureName", False).asString()
+        except Exception:
+            _debug.log_exception("LedFaceShadingNodeOverride.updateDG")
+            self._texture_name = ""
+
+    def updateShader(self, shader, mappings):
+        try:
+            texture = texture_registry.get_texture(self._texture_name)
+            print(
+                "LedFaceCapture: updateShader() textureName=%r -> texture=%r"
+                % (self._texture_name, texture)
+            )
+            if texture is None:
+                return
+            texture_assignment = omr.MTextureAssignment()
+            texture_assignment.texture = texture
+            shader.setParameter("map", texture_assignment)
+
+            if self._sampler_state is None:
+                desc = omr.MSamplerStateDesc()
+                desc.filter = omr.MSamplerState.kMinMagMipLinear
+                desc.addressU = omr.MSamplerState.kTexClamp
+                desc.addressV = omr.MSamplerState.kTexClamp
+                self._sampler_state = omr.MStateManager.acquireSamplerState(desc)
+                print("LedFaceCapture: acquired sampler state ->", self._sampler_state)
+            if self._sampler_state is not None:
+                shader.setParameter("mapSampler", self._sampler_state)
+        except Exception:
+            _debug.log_exception("LedFaceShadingNodeOverride.updateShader")
 
 
 def register(plugin_fn):

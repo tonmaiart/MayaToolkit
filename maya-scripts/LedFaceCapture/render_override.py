@@ -70,11 +70,39 @@ def _resolve_dag_path(name):
     return path
 
 
+def _orthographic_projection_matrix(half_width, half_height, near_clip, far_clip):
+    """Row-vector (v' = v * M) orthographic projection, centered on the view
+    axis, built directly from explicit half-extents.
+
+    Ground truth from months of pixel-bbox measurements (see git history)
+    ruled out every camera-attribute/filmFit/render-target-aspect/
+    destination-viewport-panel-aspect lever as the source of the capture's
+    aspect distortion -- none of them reliably controlled the actual
+    rendered aspect of this custom MSceneRender's orthographic camera.
+    Handing MCameraOverride a fully explicit projection matrix sidesteps
+    whatever implicit aspect Maya was reconciling to and makes the capture's
+    aspect exactly what half_width/half_height say, every time.
+    """
+    depth = far_clip - near_clip
+    return om2.MMatrix([
+        1.0 / half_width, 0.0, 0.0, 0.0,
+        0.0, 1.0 / half_height, 0.0, 0.0,
+        0.0, 0.0, -2.0 / depth, 0.0,
+        0.0, 0.0, -(far_clip + near_clip) / depth, 1.0,
+    ])
+
+
 def _resolve_selection_list(name):
     """objectSetOverride wants an MSelectionList (confirmed: passing a bare
-    MObject raised `MSelectionList expected` on Maya 2026), not the set's
-    MObject directly -- add the set node's name to a fresh list and hand
-    that back.
+    MObject raised `MSelectionList expected` on Maya 2026) -- but ground
+    truth from raw-pixel diagnostics shows the capture pass rendering
+    literally nothing (0 lit pixels) no matter what shader/lighting the rig
+    cubes use, which is exactly what "the list contains the *set node*
+    itself" would produce: a set node has no shape to draw, so restricting
+    the scene to "just this one non-renderable node" is indistinguishable
+    from restricting it to nothing. "the set of objects to view" in the docs
+    reads as the flattened membership, not a set-node reference -- expand it
+    via MFnSet.getMembers() instead of handing back the bare set node.
     """
     if not name:
         return None
@@ -83,7 +111,12 @@ def _resolve_selection_list(name):
         sel.add(name)
     except RuntimeError:
         return None
-    return sel
+    try:
+        set_fn = om2.MFnSet(sel.getDependNode(0))
+        return set_fn.getMembers(True)
+    except Exception:
+        _debug.log_exception("_resolve_selection_list")
+        return sel
 
 
 class _CaptureSceneRender(omr.MSceneRender):
@@ -121,27 +154,100 @@ class _CaptureSceneRender(omr.MSceneRender):
         return self._clear_op
 
     def cameraOverride(self):
-        print("LedFaceCapture: _CaptureSceneRender.cameraOverride() called")
         try:
             camera_name = self._config_node_fn.findPlug("cameraName", False).asString()
             dag_path = _resolve_dag_path(camera_name)
             if dag_path is None:
                 return None
+            # MFnCamera on this Maya build exposes neither the attribute nor
+            # a same-named method for orthographicWidth (confirmed:
+            # AttributeError even called as a method) -- read the camera
+            # shape's plugs directly instead, the same findPlug() pattern
+            # used everywhere else in this codebase.
+            cam_node_fn = om2.MFnDependencyNode(dag_path.node())
+            ortho_width = cam_node_fn.findPlug("orthographicWidth", False).asDouble()
+            h_aperture = cam_node_fn.findPlug("horizontalFilmAperture", False).asDouble()
+            v_aperture = cam_node_fn.findPlug("verticalFilmAperture", False).asDouble()
+            near_clip = cam_node_fn.findPlug("nearClipPlane", False).asDouble()
+            far_clip = cam_node_fn.findPlug("farClipPlane", False).asDouble()
+
+            half_width = ortho_width / 2.0
+            aspect = (h_aperture / v_aperture) if v_aperture else 1.0
+            half_height = half_width / aspect
+
             override = omr.MCameraOverride()
             override.mCameraPath = dag_path
+            # An explicit projection matrix, not just mCameraPath: letting
+            # Maya derive this custom MSceneRender's orthographic aspect on
+            # its own (from the camera's film aperture/filmFit, the render
+            # target's own pixel dimensions, or the destination viewport
+            # panel -- all tried and ruled out by ground-truth pixel-bbox
+            # measurements) never reliably matched what the camera was
+            # actually configured for. Building the projection ourselves
+            # from the camera's own orthographicWidth/aperture-ratio removes
+            # that guesswork -- see _orthographic_projection_matrix().
+            override.mUseProjectionMatrix = True
+            override.mProjectionMatrix = _orthographic_projection_matrix(
+                half_width, half_height, near_clip, far_clip
+            )
             return override
         except Exception:
             _debug.log_exception("cameraOverride")
             return None
 
     def objectSetOverride(self):
-        print("LedFaceCapture: _CaptureSceneRender.objectSetOverride() called")
         try:
             set_name = self._config_node_fn.findPlug("captureSetName", False).asString()
-            return _resolve_selection_list(set_name)
+            sel = _resolve_selection_list(set_name)
+            # Confirmed working (no "MSelectionList expected" error) has only
+            # ever meant the TYPE was accepted, never that it actually
+            # resolves to the expected member objects -- print the real
+            # content so a wrong/empty set is visible instead of assumed.
+            member_names = []
+            if sel is not None:
+                try:
+                    it = om2.MItSelectionList(sel)
+                    while not it.isDone():
+                        try:
+                            member_names.append(it.getDagPath().fullPathName())
+                        except Exception:
+                            member_names.append(repr(it.getDependNode()))
+                        it.next()
+                except Exception:
+                    member_names = ["<MItSelectionList failed>"]
+            print(
+                "LedFaceCapture: _CaptureSceneRender.objectSetOverride() called, set_name=%r sel=%r members=%s"
+                % (set_name, sel, member_names)
+            )
+            return sel
         except Exception:
             _debug.log_exception("objectSetOverride")
             return None
+
+    def renderFilterOverride(self):
+        # objectSetOverride() only restricts which SCENE geometry gets
+        # rendered -- it has no effect on manipulator/HUD/UI overlay draw
+        # items, which MSceneRender includes by default (kRenderAllItems) as
+        # a completely separate concern. That's the likely explanation for
+        # the capture picking up the move manipulator/gizmo the moment
+        # something is selected, unrelated to the boolean rig entirely.
+        # Restricting to just shaded scene geometry (opaque + transparent,
+        # no UI items) should exclude it. Unverified on first write -- exact
+        # constant names reconstructed from the general MSceneFilterOption
+        # pattern, not confirmed live; if this errors, run
+        # help(omr.MSceneRender) and check the real enum member names/the
+        # real method name (may be named differently, e.g. a property
+        # instead of a method).
+        try:
+            filter_flags = (
+                omr.MSceneRender.kRenderOpaqueShadedItems
+                | omr.MSceneRender.kRenderTransparentShadedItems
+            )
+            print("LedFaceCapture: renderFilterOverride() called, returning", filter_flags)
+            return filter_flags
+        except Exception:
+            _debug.log_exception("renderFilterOverride")
+            return omr.MSceneRender.kRenderAllItems
 
     def targetOverrideList(self):
         # NOTE: this virtual is named `targetOverrideList` on MSceneRender in
@@ -211,6 +317,53 @@ class _CaptureSceneRender(omr.MSceneRender):
             if not raw_ptr:
                 return
             raw_bytes = ctypes.string_at(raw_ptr, slice_pitch)
+            # Bypass the entire shading/UV/material pipeline for this check --
+            # ground truth on whether the capture itself (camera + object set
+            # + filter) contains the expected boolean-rig pattern, independent
+            # of anything happening downstream in node_led_face_material.py.
+            # RGBA8 tightly packed: every 4th byte starting at 0 is R.
+            red_channel = raw_bytes[0::4]
+            lit_count = sum(1 for v in red_channel if v > 128)
+            dark_count = len(red_channel) - lit_count
+            print(
+                "LedFaceCapture: postSceneRender -- raw pixel stats: min=%d max=%d lit(R>128)=%d dark=%d of %d"
+                % (min(raw_bytes), max(raw_bytes), lit_count, dark_count, len(red_channel))
+            )
+            # Ground truth for the Y-stretch question, no camera-API
+            # guessing involved: the rig is a 4x4 grid with EQUAL spacing in
+            # X and Y, so a diagonal on-pattern (dev_smoke_test's default:
+            # (0,0),(1,1),(2,2),(3,3)) spans the SAME world-space distance
+            # horizontally and vertically. Measure the lit-pixel bounding
+            # box directly from the raw buffer -- if width_px != height_px,
+            # the distortion is confirmed to be happening in the capture
+            # itself (camera/target), not anywhere in the display/UV/shader
+            # pipeline, and the ratio is the exact correction factor needed.
+            stride = row_pitch // 4
+            lit_rows = []
+            lit_cols = []
+            for idx, v in enumerate(red_channel):
+                if v > 128:
+                    lit_rows.append(idx // stride)
+                    lit_cols.append(idx % stride)
+            if lit_rows:
+                bbox_w = max(lit_cols) - min(lit_cols) + 1
+                bbox_h = max(lit_rows) - min(lit_rows) + 1
+                # With a non-square target (resolutionX != resolutionY on the
+                # config node), equal bbox_w/bbox_h no longer means "no
+                # distortion" -- what matters is equal FRACTIONAL coverage
+                # per axis, since the world content is square but the target
+                # pixel grid itself might not be.
+                frac_w = bbox_w / float(self._target_width)
+                frac_h = bbox_h / float(self._target_height)
+                print(
+                    "LedFaceCapture: postSceneRender -- lit-pixel bbox width=%d/%d (%.3f) "
+                    "height=%d/%d (%.3f) -- fractional ratio=%.3f (1.0 means no distortion)"
+                    % (
+                        bbox_w, self._target_width, frac_w,
+                        bbox_h, self._target_height, frac_h,
+                        frac_w / frac_h,
+                    )
+                )
             texture_name = self._config_node_fn.findPlug("textureName", False).asString()
             texture_registry.push_frame(texture_name, self._target_width, self._target_height, raw_bytes)
             print("LedFaceCapture: postSceneRender -- pushed frame for", repr(texture_name))
@@ -240,7 +393,10 @@ class LedFaceCaptureOverride(omr.MRenderOverride):
     def setup(self, destination):
         try:
             config_fn = _find_config_node_fn()
-            print("LedFaceCapture: setup() -- config node found:", config_fn.name() if config_fn else None)
+            print(
+                "LedFaceCapture: setup() -- destination=%r config node found: %s"
+                % (destination, config_fn.name() if config_fn else None)
+            )
             if config_fn is not None:
                 # setup() runs on every redraw, not once -- building a brand
                 # new _CaptureSceneRender here every time (as an earlier
