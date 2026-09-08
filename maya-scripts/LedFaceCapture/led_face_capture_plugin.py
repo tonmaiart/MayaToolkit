@@ -21,12 +21,12 @@ from pathlib import Path
 # relative `from . import ...` raises KeyError('__name__' not in globals).
 # `LedFaceCapture`'s parent (maya-scripts/) is already on sys.path, so
 # absolute imports through the package name work instead. The submodules
-# themselves (node_led_capture_config.py etc.) are loaded normally through
+# themselves (node_led_face_material.py etc.) are loaded normally through
 # that import, so relative imports inside *them* are fine.
 import maya.api.OpenMaya as om2
 import maya.api.OpenMayaRender as omr
 
-from LedFaceCapture import node_led_capture_config
+from LedFaceCapture import node_led_face_blend
 from LedFaceCapture import node_led_face_material
 from LedFaceCapture import texture_registry
 from LedFaceCapture.render_override import LedFaceCaptureOverride
@@ -55,8 +55,8 @@ BUILD_STAMP = _compute_build_stamp()
 def initializePlugin(plugin_obj):
     plugin_fn = om2.MFnPlugin(plugin_obj, "UkoreHub", "0.1.0-prototype", "Any")
 
-    node_led_capture_config.register(plugin_fn)
     node_led_face_material.register(plugin_fn)
+    node_led_face_blend.register(plugin_fn)
 
     global _override_instance
     _override_instance = LedFaceCaptureOverride()
@@ -87,6 +87,6 @@ def uninitializePlugin(plugin_obj):
     except Exception:
         om2.MGlobal.displayWarning("LedFaceCapture: failed to deregister ledFaceMaterial.")
     try:
-        node_led_capture_config.deregister(plugin_fn)
+        node_led_face_blend.deregister(plugin_fn)
     except Exception:
-        om2.MGlobal.displayWarning("LedFaceCapture: failed to deregister ledCaptureConfig.")
+        om2.MGlobal.displayWarning("LedFaceCapture: failed to deregister ledFaceBlend.")

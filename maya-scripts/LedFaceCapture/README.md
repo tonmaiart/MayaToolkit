@@ -134,18 +134,21 @@ code.
 ## What's here
 
 - `texture_registry.py` -- module-level map of name -> current `MTexture`.
-  `push_frame()` creates a fresh GPU texture straight from a raw byte buffer
-  every call; nothing here ever touches disk.
-- `node_led_capture_config.py` -- `ledCaptureConfig` node: pure config
-  (`cameraName`, `captureSetName`, `resolutionX/Y`, `textureName`). The
-  render override reads this every frame; it holds no logic of its own.
+  `push_frame()` updates the existing GPU texture in place via
+  `MTexture.update()` when dimensions match, falling back to acquiring a
+  fresh one otherwise; nothing here ever touches disk.
 - `node_led_face_material.py` -- `ledFaceMaterial` node (assignable as a
-  surface shader) + `LedFaceShaderOverride`, which rebinds whatever texture
-  `texture_registry` holds for its `textureName` into VP2's draw every
-  refresh.
+  utility node) + `LedFaceShadingNodeOverride`, which rebinds whatever
+  texture `texture_registry` holds for its `textureName` into VP2's draw
+  every refresh. Also carries its own capture config (`cameraName`,
+  `captureSetName`, `resolutionX/Y`) -- there is no separate config node
+  type; one `ledFaceMaterial` node fully describes one capture channel, and
+  a scene can have any number of them (e.g. one per eye) active at once.
 - `render_override.py` -- `LedFaceCaptureOverride`, an `MRenderOverride` that
-  adds one extra offscreen `MSceneRender` pass (camera + object-set override
-  restricted to the boolean rig) ahead of a minimal main-scene reproduction.
+  adds one extra offscreen `MSceneRender` pass per distinct `textureName`
+  found on any `ledFaceMaterial` in the scene (camera + object-set override
+  restricted to that channel's capture set) ahead of a minimal main-scene
+  reproduction.
 - `led_face_capture_plugin.py` -- the actual Maya plug-in
   (`initializePlugin`/`uninitializePlugin`); load this file directly.
 - `__init__.py` -- `load()`/`unload()` convenience wrapper.
@@ -157,22 +160,26 @@ import maya.cmds as cmds
 import LedFaceCapture
 LedFaceCapture.load()
 
-# 1. Config node -- tells the capture pass what to render and where to publish it
-config = cmds.createNode("ledCaptureConfig", name="robotFaceLED_config")
-cmds.setAttr(config + ".cameraName", "ledCaptureCam", type="string")       # your ortho cam's transform
-cmds.setAttr(config + ".captureSetName", "ledRigCaptureSet", type="string")  # object set containing the boolean rig geo
-cmds.setAttr(config + ".textureName", "robotFaceLED", type="string")
-cmds.setAttr(config + ".resolutionX", 64)
-cmds.setAttr(config + ".resolutionY", 64)
+# One node describes both "how to capture" and "how to display" this
+# channel -- assign it, then set its capture config + textureName.
+shader = cmds.shadingNode("ledFaceMaterial", asUtility=True, name="robotFaceLED_mat")
+cmds.setAttr(shader + ".cameraName", "ledCaptureCam", type="string")         # your ortho cam's transform
+cmds.setAttr(shader + ".captureSetName", "ledRigCaptureSet", type="string")  # object set containing the boolean rig geo
+cmds.setAttr(shader + ".textureName", "robotFaceLED", type="string")
+cmds.setAttr(shader + ".resolutionX", 64)
+cmds.setAttr(shader + ".resolutionY", 64)
 
-# 2. Shader -- assign to the robot's face mesh
-shader = cmds.shadingNode("ledFaceMaterial", asShader=True, name="robotFaceLED_mat")
-cmds.setAttr(shader + ".textureName", "robotFaceLED", type="string")  # must match config's textureName
-sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name=shader + "SG")
-cmds.connectAttr(shader + ".outColor", sg + ".surfaceShader")
+lambert = cmds.shadingNode("lambert", asShader=True, name="robotFaceLED_lambert")
+cmds.connectAttr(shader + ".outColor", lambert + ".color")
+sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name=lambert + "SG")
+cmds.connectAttr(lambert + ".outColor", sg + ".surfaceShader")
 cmds.sets("robotHeadFaceMesh", edit=True, forceElement=sg)
 
-# 3. Enable the override: Viewport menu > Renderer > LED Face Capture
+# For a second independent channel (e.g. the other eye), repeat with a
+# different textureName/cameraName/captureSetName on another ledFaceMaterial
+# node -- render_override.py runs one capture pass per distinct textureName.
+
+# Enable the override: Viewport menu > Renderer > LED Face Capture
 ```
 
 ## Known risk points -- verify inside a real Maya session before trusting this
@@ -404,7 +411,7 @@ each is to need a fix:
 
 If the "boolean rig" is really just per-LED on/off flags (no 3D
 shading/overlap that needs an actual camera render), skip
-`render_override.py`/`node_led_capture_config.py` entirely: write the RGBA
+`render_override.py` entirely: write the RGBA
 buffer straight from the rig's attribute values into
 `texture_registry.push_frame()` on an attribute-changed callback, and keep
 only `node_led_face_material.py` + `texture_registry.py`. Same shader

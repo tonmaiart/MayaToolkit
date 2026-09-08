@@ -7,12 +7,22 @@ pipeline.
 """
 from __future__ import annotations
 
+import ctypes
+
 import maya.api.OpenMayaRender as omr
 import maya.cmds as cmds
 
 from . import _debug
 
 _LED_FACE_MATERIAL_TYPE = "ledFaceMaterial"
+_LED_FACE_BLEND_TYPE = "ledFaceBlend"
+# Must match node_led_face_blend.MAX_INPUTS -- duplicated here (rather than
+# imported) to avoid a circular import (node_led_face_blend imports this
+# module to call get_texture()/get_dummy_black()).
+_LED_FACE_BLEND_MAX_INPUTS = 4
+
+_DUMMY_BLACK_NAME = "__ledFaceCaptureDummyBlack__"
+_dummy_black_texture = None
 
 # maya.api.OpenMayaRender has no standalone MRasterFormat class (confirmed
 # absent from dir(omr), dir(MRenderTargetDescription), and the old-style
@@ -129,6 +139,16 @@ def _mark_consumers_dirty(name):
     try:
         candidates = cmds.ls(type=_LED_FACE_MATERIAL_TYPE) or []
         matches = [node for node in candidates if cmds.getAttr(node + ".textureName") == name]
+
+        # ledFaceBlend nodes (node_led_face_blend.py) sum several named
+        # textures together -- any one of its N slots matching `name` means
+        # this node's composited output needs to redraw too.
+        for node in (cmds.ls(type=_LED_FACE_BLEND_TYPE) or []):
+            for i in range(_LED_FACE_BLEND_MAX_INPUTS):
+                if cmds.getAttr("%s.textureName%d" % (node, i)) == name:
+                    matches.append(node)
+                    break
+
         if matches:
             cmds.dgdirty(matches)
     except Exception:
@@ -140,9 +160,106 @@ def get_texture(name):
     return entry.texture if entry is not None else None
 
 
+def get_dummy_black():
+    """A 1x1 fully-opaque black MTexture, lazily created once and cached for
+    the life of the process.
+
+    Used by node_led_face_blend.py to fill any of its input slots that
+    don't have a real textureName set, so its fragment can always sample
+    all N slots and sum them unconditionally (no per-slot branching in the
+    shader for "is this one even bound") -- an unbound slot just
+    contributes (0, 0, 0) to the sum, same as texture_registry not having
+    an entry for it yet.
+    """
+    global _dummy_black_texture
+    if _dummy_black_texture is not None:
+        return _dummy_black_texture
+    texture_manager = omr.MRenderer.getTextureManager()
+    if texture_manager is None:
+        return None
+    desc = omr.MTextureDescription()
+    desc.setToDefault2DTexture()
+    desc.fWidth = 1
+    desc.fHeight = 1
+    desc.fFormat = RASTER_FORMAT_R8G8B8A8_UNORM
+    _dummy_black_texture = texture_manager.acquireTexture(_DUMMY_BLACK_NAME, desc, b"\x00\x00\x00\xff")
+    return _dummy_black_texture
+
+
+def compose_horizontal_atlas(output_name, source_names):
+    """Reads back the current pixels of each of `source_names` (in order)
+    and concatenates them left-to-right into ONE combined RGBA8 buffer,
+    then pushes that as `output_name` via push_frame().
+
+    Exists so several independently-captured channels (e.g. one per eye)
+    can share ONE final texture with zero risk of one's content bleeding
+    into another's: they occupy strictly disjoint pixel COLUMNS by
+    construction, decided here in plain Python, never by blending/summing
+    pixel values together in a shader. That distinction matters for this
+    plugin specifically -- every attempt at combining multiple
+    ledFaceMaterial outputs via a shading-network node (layeredTexture,
+    plusMinusAverage, a custom multi-texture blend fragment) ran into VP2
+    fragment-splicing/compilation problems serious enough to abandon that
+    whole approach; assembling the pixels directly here needs no fragment
+    splicing of any kind.
+
+    Sources of differing heights are top-aligned against the tallest one;
+    the gap (if any) stays black. A source with no current entry (capture
+    hasn't produced a frame yet) is skipped, leaving its column black too.
+    """
+    if not output_name or not source_names:
+        return
+
+    sources = []
+    for name in source_names:
+        entry = _ENTRIES.get(name)
+        if entry is None or entry.texture is None:
+            continue
+        try:
+            raw_ptr, row_pitch, slice_pitch = entry.texture.rawData()
+            if not raw_ptr:
+                continue
+            raw_bytes = ctypes.string_at(raw_ptr, slice_pitch)
+            entry.texture.freeRawData(raw_ptr)
+        except Exception:
+            _debug.log_exception("texture_registry.compose_horizontal_atlas -- reading %r" % name)
+            continue
+        sources.append((entry.width, entry.height, row_pitch, raw_bytes))
+
+    if not sources:
+        return
+
+    total_width = sum(width for width, height, row_pitch, raw_bytes in sources)
+    max_height = max(height for width, height, row_pitch, raw_bytes in sources)
+    if total_width <= 0 or max_height <= 0:
+        return
+
+    # Zero-filled -- reads back as black in any gap/padding area. Alpha is
+    # irrelevant either way: the ledFaceMaterial fragment only ever samples
+    # `.rgb` (see node_led_face_material.py), never touches alpha.
+    out_row_pitch = total_width * 4
+    out_buffer = bytearray(out_row_pitch * max_height)
+
+    x_offset = 0
+    for width, height, row_pitch, raw_bytes in sources:
+        row_bytes = width * 4
+        for row in range(height):
+            src_start = row * row_pitch
+            dst_start = row * out_row_pitch + x_offset * 4
+            out_buffer[dst_start:dst_start + row_bytes] = raw_bytes[src_start:src_start + row_bytes]
+        x_offset += width
+
+    push_frame(output_name, total_width, max_height, bytes(out_buffer), out_row_pitch)
+
+
 def clear():
     texture_manager = omr.MRenderer.getTextureManager()
     for entry in _ENTRIES.values():
         if texture_manager is not None and entry.texture is not None:
             texture_manager.releaseTexture(entry.texture)
     _ENTRIES.clear()
+
+    global _dummy_black_texture
+    if texture_manager is not None and _dummy_black_texture is not None:
+        texture_manager.releaseTexture(_dummy_black_texture)
+    _dummy_black_texture = None

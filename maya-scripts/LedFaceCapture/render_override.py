@@ -29,23 +29,76 @@ import ctypes
 
 import maya.api.OpenMaya as om2
 import maya.api.OpenMayaRender as omr
+import maya.cmds as cmds
 
 from . import _debug
 from . import texture_registry
-from .node_led_capture_config import NODE_NAME as CONFIG_NODE_NAME
+from .node_led_face_material import NODE_NAME as MATERIAL_NODE_NAME
 
 OVERRIDE_NAME = "ledFaceCaptureOverride"
 
 
-def _find_config_node_fn():
-    """First ledCaptureConfig node in the scene, or None if there isn't one yet."""
-    iterator = om2.MItDependencyNodes(om2.MFn.kPluginDependNode)
-    while not iterator.isDone():
-        node_fn = om2.MFnDependencyNode(iterator.thisNode())
-        if node_fn.typeName == CONFIG_NODE_NAME:
-            return node_fn
-        iterator.next()
-    return None
+def _find_capture_configs():
+    """One MFnDependencyNode per distinct textureName among every
+    ledFaceMaterial node in the scene -- there is no separate config node
+    type any more (cameraName/captureSetName/resolutionX/Y now live directly
+    on ledFaceMaterial, see node_led_face_material.py), and a scene can have
+    any number of independent capture channels (e.g. one per eye) active at
+    once. First node found for a given textureName wins if more than one
+    shares that name -- they're expected to agree on how to capture it, so
+    only one needs to actually describe it.
+
+    cmds.ls(type=...) is natively type-indexed in C++ (same lesson as
+    texture_registry.py's _mark_consumers_dirty()) instead of walking every
+    plugin node in the scene by hand.
+    """
+    configs = {}
+    for name in (cmds.ls(type=MATERIAL_NODE_NAME) or []):
+        sel = om2.MSelectionList()
+        try:
+            sel.add(name)
+        except RuntimeError:
+            continue
+        node_fn = om2.MFnDependencyNode(sel.getDependNode(0))
+        # Atlas-composer nodes (atlasSources set, see _compose_atlases())
+        # are display-only consumers of OTHER capture channels, not capture
+        # sources themselves -- treating one as its own capture channel
+        # would run a bogus, camera-less/unrestricted scene-render pass
+        # under its textureName every frame, clobbering the atlas this
+        # module just finished assembling moments earlier in the same
+        # setup() call.
+        try:
+            if node_fn.findPlug("atlasSources", False).asString():
+                continue
+        except Exception:
+            pass
+        texture_name = node_fn.findPlug("textureName", False).asString()
+        if texture_name and texture_name not in configs:
+            configs[texture_name] = node_fn
+    return configs
+
+
+def _compose_atlases():
+    """Runs texture_registry.compose_horizontal_atlas() for every
+    ledFaceMaterial node that has atlasSources set, once per redraw.
+
+    Reads whatever's currently in texture_registry for each source name --
+    i.e. last frame's captures, since this runs at the START of setup(),
+    before this frame's own capture passes execute. One frame of lag on the
+    composed result is an acceptable, unnoticeable trade for not needing
+    any new render-operation type to hook "after all captures, before the
+    main scene render" instead.
+    """
+    try:
+        for name in (cmds.ls(type=MATERIAL_NODE_NAME) or []):
+            sources = cmds.getAttr(name + ".atlasSources")
+            if not sources:
+                continue
+            source_names = [s.strip() for s in sources.split(",") if s.strip()]
+            output_name = cmds.getAttr(name + ".textureName")
+            texture_registry.compose_horizontal_atlas(output_name, source_names)
+    except Exception:
+        _debug.log_exception("_compose_atlases")
 
 
 def _resolve_dag_path(name):
@@ -120,7 +173,11 @@ def _resolve_selection_list(name):
 
 
 class _CaptureSceneRender(omr.MSceneRender):
-    """Offscreen ortho-camera pass restricted to the boolean-rig capture set."""
+    """Offscreen ortho-camera pass restricted to one capture set -- one
+    instance per distinct textureName (see _find_capture_configs()), so a
+    scene with several independent capture channels (e.g. left/right eye)
+    runs one of these each, concurrently, inside the same override.
+    """
 
     def __init__(self, name, config_node_fn):
         omr.MSceneRender.__init__(self, name)
@@ -359,7 +416,7 @@ class _CaptureSceneRender(omr.MSceneRender):
                     bbox_w = max(lit_cols) - min(lit_cols) + 1
                     bbox_h = max(lit_rows) - min(lit_rows) + 1
                     # With a non-square target (resolutionX != resolutionY
-                    # on the config node), equal bbox_w/bbox_h no longer
+                    # on the ledFaceMaterial node), equal bbox_w/bbox_h no longer
                     # means "no distortion" -- what matters is equal
                     # FRACTIONAL coverage per axis, since the world content
                     # is square but the target pixel grid itself might not
@@ -382,6 +439,25 @@ class _CaptureSceneRender(omr.MSceneRender):
         except Exception:
             _debug.log_exception("postSceneRender")
 
+    def release(self):
+        """Releases the GPU render target, if any. Called by
+        LedFaceCaptureOverride.setup() when this instance's textureName no
+        longer shows up on any ledFaceMaterial in the scene (node deleted,
+        renamed, or its texName cleared) -- without this, a dropped capture
+        channel's render target leaks for the rest of the Maya session (see
+        __init__'s note on why a fixed target name bit us hard previously).
+        """
+        try:
+            if self._target is not None:
+                target_mgr = omr.MRenderer.getRenderTargetManager()
+                if target_mgr is not None:
+                    target_mgr.releaseRenderTarget(self._target)
+                self._target = None
+                self._target_width = 0
+                self._target_height = 0
+        except Exception:
+            _debug.log_exception("_CaptureSceneRender.release")
+
 
 class LedFaceCaptureOverride(omr.MRenderOverride):
     def __init__(self):
@@ -391,7 +467,12 @@ class LedFaceCaptureOverride(omr.MRenderOverride):
         self._clear_op.setClearGradient(False)
         self._main_scene_op = omr.MSceneRender("ledFaceMainScene")
         self._present_op = omr.MPresentTarget("ledFacePresent")
-        self._capture_op = None
+        # One _CaptureSceneRender per distinct textureName, keyed by that
+        # name -- an arbitrary number of independent capture channels (e.g.
+        # left eye + right eye, each its own camera/capture set) can be
+        # active at once, each running as its own operation ahead of the
+        # shared main-scene pass.
+        self._capture_ops = {}
         self._operations = [self._clear_op, self._main_scene_op, self._present_op]
         self._operation_index = 0
 
@@ -403,29 +484,43 @@ class LedFaceCaptureOverride(omr.MRenderOverride):
 
     def setup(self, destination):
         try:
-            config_fn = _find_config_node_fn()
+            _compose_atlases()
+
+            configs = _find_capture_configs()
             _debug.log(
-                "LedFaceCapture: setup() -- destination=%r config node found: %s"
-                % (destination, config_fn.name() if config_fn else None)
+                "LedFaceCapture: setup() -- destination=%r capture channels found: %s"
+                % (destination, sorted(configs.keys()))
             )
-            if config_fn is not None:
-                # setup() runs on every redraw, not once -- building a brand
-                # new _CaptureSceneRender here every time (as an earlier
-                # version of this method did) throws away its live
-                # self._target without ever releasing it, so every
-                # subsequent acquireRenderTarget("ledFaceCaptureTarget", ...)
-                # collides with the still-held-but-orphaned previous target
-                # and silently returns None. Reuse the same instance across
-                # calls; only its config reference needs refreshing (the
-                # underlying scene node could have been deleted/recreated).
-                if self._capture_op is None:
-                    self._capture_op = _CaptureSceneRender("ledFaceCapture", config_fn)
+
+            # Drop capture ops for channels that disappeared (node deleted,
+            # renamed, or texName cleared) -- release their GPU render
+            # targets first, or they leak for the rest of the session (see
+            # _CaptureSceneRender.release()'s docstring).
+            for texture_name in list(self._capture_ops.keys()):
+                if texture_name not in configs:
+                    self._capture_ops.pop(texture_name).release()
+
+            # setup() runs on every redraw, not once -- building a brand new
+            # _CaptureSceneRender for a channel that already has one throws
+            # away its live self._target without ever releasing it, so every
+            # subsequent acquireRenderTarget(...) collides with the
+            # still-held-but-orphaned previous target and silently returns
+            # None. Reuse the same instance across calls per channel; only
+            # its config reference needs refreshing (the underlying scene
+            # node could have been deleted/recreated under the same name).
+            for texture_name, config_fn in configs.items():
+                existing = self._capture_ops.get(texture_name)
+                if existing is None:
+                    self._capture_ops[texture_name] = _CaptureSceneRender(
+                        "ledFaceCapture_" + texture_name, config_fn
+                    )
                 else:
-                    self._capture_op._config_node_fn = config_fn
-                self._operations = [self._capture_op, self._clear_op, self._main_scene_op, self._present_op]
-            else:
-                self._capture_op = None
-                self._operations = [self._clear_op, self._main_scene_op, self._present_op]
+                    existing._config_node_fn = config_fn
+
+            self._operations = (
+                list(self._capture_ops.values())
+                + [self._clear_op, self._main_scene_op, self._present_op]
+            )
             self._operation_index = 0
         except Exception:
             _debug.log_exception("setup")

@@ -63,8 +63,8 @@ from . import _debug
 from . import texture_registry
 
 NODE_NAME = "ledFaceMaterial"
-# TODO: same caveat as node_led_capture_config.NODE_ID -- placeholder from the
-# devkit example range, replace with a studio-issued id before shipping.
+# TODO: placeholder from the devkit example range, replace with a
+# studio-issued id before shipping.
 NODE_ID = om2.MTypeId(0x0011D701)
 # "operation" (a utility node contributing a value into a larger shading
 # network), not "surface" (a standalone, complete surface shader) -- matches
@@ -98,7 +98,24 @@ DRAW_REGISTRANT_ID = "ledFaceMaterialRegistrant"
 # .py was edited). A new name forces a genuinely fresh registration instead
 # of silently testing stale GPU-side code -- bump this again any time the
 # fragment source changes and a running Maya session needs to pick it up.
-FRAGMENT_NAME = "ledFaceCaptureFragmentTex6"
+#
+# This is now a PREFIX, not the fragment's actual name -- confirmed live:
+# two ledFaceMaterial nodes both feeding a shared downstream node (e.g.
+# summed via plusMinusAverage) only had ONE of the two textures actually
+# show up, no matter which node/slot -- each node worked perfectly on its
+# own, feeding a lambert directly, so the capture/texture_registry/shading
+# chain per node was never the problem. Root cause: every ledFaceMaterial
+# instance returned the exact same FRAGMENT_NAME from fragmentName()/
+# outputForConnection(), so once two instances' output landed in the same
+# compiled VP2 shading effect, Maya's compiler treated them as the SAME
+# fragment usage site sharing ONE parameter binding (map/mapSampler) --
+# whichever instance's updateShader() bound last simply overwrote the
+# other's texture, so only one ever actually displayed. Each
+# LedFaceShadingNodeOverride instance now registers and uses its OWN
+# uniquely-named fragment (see __init__) built from this prefix, so
+# multiple ledFaceMaterial nodes combined in one shading network no longer
+# collide.
+FRAGMENT_NAME_PREFIX = "ledFaceCaptureFragmentTex6"
 
 # Phase 2: samples a real 2D texture (bound at render time from
 # texture_registry, see updateDG()/updateShader() below) instead of the
@@ -136,7 +153,18 @@ FRAGMENT_NAME = "ledFaceCaptureFragmentTex6"
 # explicit orthographic projection matrix instead, the capture itself comes
 # out undistorted and this manual per-material fudge factor is no longer
 # needed.
-_FRAGMENT_XML = """<fragment uiName="{name}" name="{name}" type="plumbing" class="ShadeFragment" version="1.0" feature_level="20">
+def _fragment_xml(name, impl_name):
+    # `name` is this instance's unique fragment name (also doubles as its
+    # single output parameter's name, matching Maya's convention); `impl_name`
+    # is the internal shader FUNCTION name inside the HLSL/Cg/GLSL source
+    # below. Both must be unique per ledFaceMaterial node instance, not just
+    # `name` -- when two instances' fragments get merged into one compiled
+    # VP2 shading effect (e.g. two ledFaceMaterial nodes summed together via
+    # plusMinusAverage), Maya concatenates every fragment's source into one
+    # shader program; two fragments both defining a function literally named
+    # `ledFaceCaptureFragmentImpl` would collide there too, on top of the
+    # fragment-name collision this was written to fix.
+    return """<fragment uiName="{name}" name="{name}" type="plumbing" class="ShadeFragment" version="1.0" feature_level="20">
   <description><![CDATA[Samples the live LED capture texture for ledFaceMaterial (phase 2).]]></description>
   <keyword value="plumbing" />
   <properties>
@@ -149,10 +177,10 @@ _FRAGMENT_XML = """<fragment uiName="{name}" name="{name}" type="plumbing" class
   </outputs>
   <implementation>
     <implementation render="OGSRenderer" language="HLSL" lang_version="11.0">
-      <function_name val="ledFaceCaptureFragmentImpl" />
+      <function_name val="{impl_name}" />
       <source>
         <![CDATA[
-float3 ledFaceCaptureFragmentImpl(float2 uvCoord, Texture2D map, sampler mapSampler)
+float3 {impl_name}(float2 uvCoord, Texture2D map, sampler mapSampler)
 {{
     float2 flipped = float2(uvCoord.x, 1.0 - uvCoord.y);
     return map.Sample(mapSampler, flipped).rgb;
@@ -161,10 +189,10 @@ float3 ledFaceCaptureFragmentImpl(float2 uvCoord, Texture2D map, sampler mapSamp
       </source>
     </implementation>
     <implementation render="OGSRenderer" language="Cg" lang_version="2.1">
-      <function_name val="ledFaceCaptureFragmentImpl" />
+      <function_name val="{impl_name}" />
       <source>
         <![CDATA[
-float3 ledFaceCaptureFragmentImpl(float2 uvCoord, sampler2D map)
+float3 {impl_name}(float2 uvCoord, sampler2D map)
 {{
     float2 flipped = float2(uvCoord.x, 1.0 - uvCoord.y);
     return tex2D(map, flipped).rgb;
@@ -173,10 +201,10 @@ float3 ledFaceCaptureFragmentImpl(float2 uvCoord, sampler2D map)
       </source>
     </implementation>
     <implementation render="OGSRenderer" language="GLSL" lang_version="3.0">
-      <function_name val="ledFaceCaptureFragmentImpl" />
+      <function_name val="{impl_name}" />
       <source>
         <![CDATA[
-vec3 ledFaceCaptureFragmentImpl(vec2 uvCoord, sampler2D map)
+vec3 {impl_name}(vec2 uvCoord, sampler2D map)
 {{
     vec2 flipped = vec2(uvCoord.x, 1.0 - uvCoord.y);
     return texture(map, flipped).rgb;
@@ -185,29 +213,30 @@ vec3 ledFaceCaptureFragmentImpl(vec2 uvCoord, sampler2D map)
       </source>
     </implementation>
   </implementation>
-</fragment>""".format(name=FRAGMENT_NAME)
+</fragment>""".format(name=name, impl_name=impl_name)
 
 
-def _ensure_fragment_registered():
+def _ensure_fragment_registered(name):
     try:
         frag_mgr = omr.MRenderer.getFragmentManager()
-        print("LedFaceCapture: getFragmentManager() ->", frag_mgr)
+        _debug.log("LedFaceCapture: getFragmentManager() ->", frag_mgr)
         if frag_mgr is None:
             print("LedFaceCapture: no fragment manager -- fragment NEVER registered")
             return False
-        already_has_it = frag_mgr.hasFragment(FRAGMENT_NAME)
-        print("LedFaceCapture: hasFragment(%r) -> %r" % (FRAGMENT_NAME, already_has_it))
+        already_has_it = frag_mgr.hasFragment(name)
+        _debug.log("LedFaceCapture: hasFragment(%r) -> %r" % (name, already_has_it))
         if already_has_it:
-            print(
-                "LedFaceCapture: skipping addShadeFragmentFromBuffer -- a fragment "
-                "with this name is already registered (could be a stale one from "
-                "an earlier session/process if its content doesn't match the "
-                "current type=\"plumbing\" XML below)"
-            )
-            print("LedFaceCapture: live fragment XML ->", frag_mgr.getFragmentXML(FRAGMENT_NAME))
+            # Per-instance names are unique per Python-process-lifetime id()
+            # (see LedFaceShadingNodeOverride.__init__) -- a name collision
+            # here would only happen if id() got reused, which CPython does
+            # do once an old object is garbage collected. Treat it the same
+            # as the old shared-fragment code did: assume it's already the
+            # right content and move on, rather than risk stepping on a
+            # fragment another live instance still depends on.
             return True
-        registered_name = frag_mgr.addShadeFragmentFromBuffer(_FRAGMENT_XML.encode("utf-8"), False)
-        print("LedFaceCapture: fragment registration returned", repr(registered_name))
+        fragment_xml = _fragment_xml(name, name + "Impl")
+        registered_name = frag_mgr.addShadeFragmentFromBuffer(fragment_xml.encode("utf-8"), False)
+        _debug.log("LedFaceCapture: fragment registration returned", repr(registered_name))
         return bool(registered_name)
     except Exception:
         _debug.log_exception("_ensure_fragment_registered")
@@ -219,6 +248,11 @@ class LedFaceMaterial(om2.MPxNode):
 
     textureName = None
     outColor = None
+    cameraName = None
+    captureSetName = None
+    resolutionX = None
+    resolutionY = None
+    atlasSources = None
 
     @staticmethod
     def creator():
@@ -241,6 +275,63 @@ class LedFaceMaterial(om2.MPxNode):
         num_fn.storable = False
         num_fn.writable = False
         om2.MPxNode.addAttribute(LedFaceMaterial.outColor)
+
+        # Formerly the separate ledCaptureConfig node type (cameraName,
+        # captureSetName, resolutionX/Y) -- folded directly onto
+        # ledFaceMaterial so one node fully self-describes both "how to
+        # capture" and "how to display" a texture channel, and the render
+        # override can drive an arbitrary number of independent capture
+        # passes (one per distinct textureName found on any ledFaceMaterial
+        # in the scene) instead of only ever the single ledCaptureConfig
+        # node it used to look for. Same attribute names/short names as the
+        # old node, on purpose -- render_override.py's findPlug() calls
+        # didn't need to change at all.
+        str_fn = om2.MFnTypedAttribute()
+        LedFaceMaterial.cameraName = str_fn.create(
+            "cameraName", "cam", om2.MFnData.kString, default_string
+        )
+        str_fn.storable = True
+        str_fn.keyable = False
+        om2.MPxNode.addAttribute(LedFaceMaterial.cameraName)
+
+        str_fn = om2.MFnTypedAttribute()
+        LedFaceMaterial.captureSetName = str_fn.create(
+            "captureSetName", "capSet", om2.MFnData.kString, default_string
+        )
+        str_fn.storable = True
+        str_fn.keyable = False
+        om2.MPxNode.addAttribute(LedFaceMaterial.captureSetName)
+
+        num_fn = om2.MFnNumericAttribute()
+        LedFaceMaterial.resolutionX = num_fn.create(
+            "resolutionX", "resX", om2.MFnNumericData.kInt, 64
+        )
+        num_fn.storable = True
+        om2.MPxNode.addAttribute(LedFaceMaterial.resolutionX)
+
+        num_fn = om2.MFnNumericAttribute()
+        LedFaceMaterial.resolutionY = num_fn.create(
+            "resolutionY", "resY", om2.MFnNumericData.kInt, 64
+        )
+        num_fn.storable = True
+        om2.MPxNode.addAttribute(LedFaceMaterial.resolutionY)
+
+        # Comma-separated texture_registry channel names (e.g. "L,R") to
+        # assemble side-by-side into THIS node's own textureName every
+        # frame -- see texture_registry.compose_horizontal_atlas() and
+        # render_override.py's setup(). Leave blank on a node that's meant
+        # to be its own capture source (the normal case); set it only on a
+        # dedicated "combined display" node that isn't a capture source
+        # itself (cameraName/captureSetName left blank on that one --
+        # render_override.py skips capture-config discovery for any node
+        # with atlasSources set, see _find_capture_configs()).
+        str_fn = om2.MFnTypedAttribute()
+        LedFaceMaterial.atlasSources = str_fn.create(
+            "atlasSources", "atlasSrc", om2.MFnData.kString, default_string
+        )
+        str_fn.storable = True
+        str_fn.keyable = False
+        om2.MPxNode.addAttribute(LedFaceMaterial.atlasSources)
 
 
 class LedFaceShadingNodeOverride(omr.MPxShadingNodeOverride):
@@ -278,6 +369,16 @@ class LedFaceShadingNodeOverride(omr.MPxShadingNodeOverride):
         self._node_obj = obj
         self._texture_name = ""
         self._sampler_state = None
+        # Unique per instance -- see FRAGMENT_NAME_PREFIX's docstring for why
+        # sharing one fragment name across every ledFaceMaterial node was the
+        # actual bug behind "two of these combined in one shading network,
+        # only one ever displays". Same id()-based uniqueness trick already
+        # used for render_override.py's per-capture-channel render target
+        # names. Registered immediately (not lazily in fragmentName()) so a
+        # fresh fragment exists in the FragmentManager before Maya's shading
+        # compiler can ever ask for it.
+        self._fragment_name = "{}_{:08x}".format(FRAGMENT_NAME_PREFIX, id(self) & 0xFFFFFFFF)
+        _ensure_fragment_registered(self._fragment_name)
 
     def supportedDrawAPIs(self):
         # Never overridden before this point in the prototype's history --
@@ -294,7 +395,7 @@ class LedFaceShadingNodeOverride(omr.MPxShadingNodeOverride):
 
     def fragmentName(self):
         _debug.log("LedFaceCapture: LedFaceShadingNodeOverride.fragmentName() called")
-        return FRAGMENT_NAME
+        return self._fragment_name
 
     def outputForConnection(self, source_plug, destination_plug):
         # Default implementation returns the name of our node's own output
@@ -313,9 +414,9 @@ class LedFaceShadingNodeOverride(omr.MPxShadingNodeOverride):
                 dest_name = repr(destination_plug)
             _debug.log(
                 "LedFaceCapture: outputForConnection() called, source=%s dest=%s -> returning %r"
-                % (source_name, dest_name, FRAGMENT_NAME)
+                % (source_name, dest_name, self._fragment_name)
             )
-        return FRAGMENT_NAME
+        return self._fragment_name
 
     def updateDG(self):
         # Real signature confirmed via help(omr.MPxShadingNodeOverride) --
@@ -373,7 +474,9 @@ def register(plugin_fn):
         om2.MPxNode.kDependNode,
         NODE_CLASSIFICATION,
     )
-    _ensure_fragment_registered()
+    # No module-level fragment registration any more -- each
+    # LedFaceShadingNodeOverride instance registers its own uniquely-named
+    # fragment in its __init__ instead (see FRAGMENT_NAME_PREFIX's docstring).
     omr.MDrawRegistry.registerShadingNodeOverrideCreator(
         DRAW_REGISTRY_KEY, DRAW_REGISTRANT_ID, LedFaceShadingNodeOverride.creator
     )

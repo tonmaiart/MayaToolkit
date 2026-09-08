@@ -1,6 +1,7 @@
 """Throwaway test scene for LedFaceCapture: builds a fake boolean LED rig (a
 grid of cubes with a per-cube shader color as the on/off bit), an ortho
-capture camera, the config/material nodes, and a plain preview plane to
+capture camera, the ledFaceMaterial node (which also carries its own capture
+config -- see node_led_face_material.py), and a plain preview plane to
 display the result -- so the whole capture -> RAM texture -> viewport-material
 pipeline can be smoke-tested without touching a real robot rig.
 
@@ -110,8 +111,9 @@ def _build_camera(cubes):
     cmds.setAttr(cam_transform + ".translateZ", 10)
     cmds.setAttr(cam_transform + ".rotate", 0, 0, 0, type="double3")
     cmds.setAttr(cam_shape + ".orthographicWidth", width)
-    # The capture render target is square (see _build_config's
-    # resolutionX/resolutionY), but a Maya camera's default film aperture is
+    # The capture render target is square (see _build_material_and_preview's
+    # resolutionX/resolutionY, now set directly on the ledFaceMaterial
+    # node), but a Maya camera's default film aperture is
     # 1.5:1 -- with a non-matching device aspect ratio, Maya stretches the
     # vertical extent to fit, which is exactly the "slightly taller" rig seen
     # on the preview plane. Forcing equal horizontal/vertical film aperture
@@ -142,24 +144,25 @@ def _build_capture_set(cubes):
     return cmds.sets(cubes, name=set_name)
 
 
-def _build_config(camera_transform, capture_set):
-    config_name = _name("config")
-    config = cmds.createNode("ledCaptureConfig", name=config_name)
-    cmds.setAttr(config + ".cameraName", camera_transform, type="string")
-    cmds.setAttr(config + ".captureSetName", capture_set, type="string")
-    cmds.setAttr(config + ".textureName", TEXTURE_NAME, type="string")
-    cmds.setAttr(config + ".resolutionX", 64)
-    cmds.setAttr(config + ".resolutionY", 64)
-    return config
-
-
-def _build_material_and_preview():
+def _build_material_and_preview(camera_transform, capture_set):
     # ledFaceMaterial is a utility node now (MPxSurfaceShadingNodeOverride),
     # feeding a real lambert's color rather than acting as the surfaceShader
     # itself -- the lambert is what Maya actually knows how to draw
     # correctly; ledFaceMaterial only needs to contribute one input to it.
+    #
+    # cameraName/captureSetName/resolutionX/Y used to live on a separate
+    # ledCaptureConfig node -- they're now attributes directly on
+    # ledFaceMaterial itself, so one node fully describes both "how to
+    # capture" and "how to display" this texture channel (see
+    # node_led_face_material.py). Setting them here is what makes this
+    # channel show up in render_override.py's per-frame scan for capture
+    # channels at all.
     shader = cmds.shadingNode("ledFaceMaterial", asUtility=True, name=_name("mat"))
     cmds.setAttr(shader + ".textureName", TEXTURE_NAME, type="string")
+    cmds.setAttr(shader + ".cameraName", camera_transform, type="string")
+    cmds.setAttr(shader + ".captureSetName", capture_set, type="string")
+    cmds.setAttr(shader + ".resolutionX", 64)
+    cmds.setAttr(shader + ".resolutionY", 64)
 
     lambert = cmds.shadingNode("lambert", asShader=True, name=_name("lambert"))
     cmds.connectAttr(shader + ".outColor", lambert + ".color", force=True)
@@ -176,15 +179,14 @@ def _build_material_and_preview():
 
 def build():
     """Creates the full test rig and prints the manual steps still required."""
-    if cmds.objExists(_name("config")):
+    if cmds.objExists(_name("mat")):
         cmds.warning("LedFaceCapture test scene already exists -- run cleanup() first.")
         return None
 
     cubes = _build_rig_grid()
     camera_transform = _build_camera(cubes)
     capture_set = _build_capture_set(cubes)
-    config = _build_config(camera_transform, capture_set)
-    shader, sg, preview_plane = _build_material_and_preview()
+    shader, sg, preview_plane = _build_material_and_preview(camera_transform, capture_set)
 
     # Checkerboard pattern by default so it's visually obvious the capture
     # is actually reading rig state and not just showing a blank/solid frame.
@@ -195,8 +197,7 @@ def build():
         "  rig cubes:      {} ({}x{} grid)\n"
         "  capture camera: {}\n"
         "  capture set:    {}\n"
-        "  config node:    {}\n"
-        "  material:       {} (textureName='{}')\n"
+        "  material:       {} (textureName='{}', carries its own capture config)\n"
         "  preview plane:  {}\n"
         "\n"
         "Next steps:\n"
@@ -204,14 +205,13 @@ def build():
         "  2. In the viewport: Renderer > LED Face Capture to enable the override.\n"
         "  3. led_test.set_pattern([(0,0), (1,1), ...]) to change which cubes are 'on' and watch the preview plane update.\n"
         "  4. led_test.cleanup() when done -- switch Renderer back to 'Viewport 2.0' first.".format(
-            len(cubes), GRID_ROWS, GRID_COLS, camera_transform, capture_set, config, shader, TEXTURE_NAME, preview_plane
+            len(cubes), GRID_ROWS, GRID_COLS, camera_transform, capture_set, shader, TEXTURE_NAME, preview_plane
         )
     )
     return {
         "cubes": cubes,
         "camera": camera_transform,
         "capture_set": capture_set,
-        "config": config,
         "shader": shader,
         "shading_group": sg,
         "preview_plane": preview_plane,

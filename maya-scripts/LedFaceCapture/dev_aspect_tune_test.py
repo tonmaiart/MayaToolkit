@@ -59,10 +59,12 @@ def run():
     print("LedFaceCapture build:", LedFaceCapture.version())
 
     import LedFaceCapture.test_scene_setup as led_test
-    if cmds.objExists(led_test._name("config")):
+    if cmds.objExists(led_test._name("mat")):
         led_test.cleanup()
     built = led_test.build()
-    config = built["config"]
+    # resolutionX/Y now live directly on the ledFaceMaterial node -- see
+    # node_led_face_material.py -- there is no separate config node any more.
+    material = built["shader"]
 
     # Corner-to-corner diagonal -- spans the full square bbox in both X and
     # Y, same pattern dev_smoke_test.py uses, so a distorted capture shows up
@@ -86,8 +88,8 @@ def run():
     cmds.modelEditor(target_panel, edit=True, rendererOverrideName=OVERRIDE_NAME, displayTextures=True)
 
     for width, height in RESOLUTIONS_TO_TEST:
-        cmds.setAttr(config + ".resolutionX", width)
-        cmds.setAttr(config + ".resolutionY", height)
+        cmds.setAttr(material + ".resolutionX", width)
+        cmds.setAttr(material + ".resolutionY", height)
         print("LedFaceCapture: ---- testing capture resolution {}x{} ----".format(width, height))
         cmds.refresh(force=True)
 
