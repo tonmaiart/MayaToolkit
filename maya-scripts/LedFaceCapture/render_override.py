@@ -199,26 +199,27 @@ class _CaptureSceneRender(omr.MSceneRender):
         try:
             set_name = self._config_node_fn.findPlug("captureSetName", False).asString()
             sel = _resolve_selection_list(set_name)
-            # Confirmed working (no "MSelectionList expected" error) has only
-            # ever meant the TYPE was accepted, never that it actually
-            # resolves to the expected member objects -- print the real
-            # content so a wrong/empty set is visible instead of assumed.
-            member_names = []
-            if sel is not None:
-                try:
-                    it = om2.MItSelectionList(sel)
-                    while not it.isDone():
-                        try:
-                            member_names.append(it.getDagPath().fullPathName())
-                        except Exception:
-                            member_names.append(repr(it.getDependNode()))
-                        it.next()
-                except Exception:
-                    member_names = ["<MItSelectionList failed>"]
-            print(
-                "LedFaceCapture: _CaptureSceneRender.objectSetOverride() called, set_name=%r sel=%r members=%s"
-                % (set_name, sel, member_names)
-            )
+            # This runs every redraw -- during Play that's every frame, so
+            # the member-listing walk below (only useful for confirming a
+            # wrong/empty capture set) is gated the same as its print,
+            # not just the print itself.
+            if _debug.DEBUG_ENABLED:
+                member_names = []
+                if sel is not None:
+                    try:
+                        it = om2.MItSelectionList(sel)
+                        while not it.isDone():
+                            try:
+                                member_names.append(it.getDagPath().fullPathName())
+                            except Exception:
+                                member_names.append(repr(it.getDependNode()))
+                            it.next()
+                    except Exception:
+                        member_names = ["<MItSelectionList failed>"]
+                _debug.log(
+                    "LedFaceCapture: _CaptureSceneRender.objectSetOverride() called, set_name=%r sel=%r members=%s"
+                    % (set_name, sel, member_names)
+                )
             return sel
         except Exception:
             _debug.log_exception("objectSetOverride")
@@ -243,7 +244,7 @@ class _CaptureSceneRender(omr.MSceneRender):
                 omr.MSceneRender.kRenderOpaqueShadedItems
                 | omr.MSceneRender.kRenderTransparentShadedItems
             )
-            print("LedFaceCapture: renderFilterOverride() called, returning", filter_flags)
+            _debug.log("LedFaceCapture: renderFilterOverride() called, returning", filter_flags)
             return filter_flags
         except Exception:
             _debug.log_exception("renderFilterOverride")
@@ -257,7 +258,7 @@ class _CaptureSceneRender(omr.MSceneRender):
         # an ordinary, never-invoked Python method: Maya kept calling the
         # *default* targetOverrideList() instead, which is why self._target
         # stayed None forever and texture_registry never received a frame.
-        print("LedFaceCapture: _CaptureSceneRender.targetOverrideList() called")
+        _debug.log("LedFaceCapture: _CaptureSceneRender.targetOverrideList() called")
         try:
             width = self._config_node_fn.findPlug("resolutionX", False).asInt()
             height = self._config_node_fn.findPlug("resolutionY", False).asInt()
@@ -304,7 +305,7 @@ class _CaptureSceneRender(omr.MSceneRender):
             return []
 
     def postSceneRender(self, context):
-        print("LedFaceCapture: _CaptureSceneRender.postSceneRender() called, target =", self._target)
+        _debug.log("LedFaceCapture: _CaptureSceneRender.postSceneRender() called, target =", self._target)
         try:
             if self._target is None:
                 return
@@ -313,60 +314,70 @@ class _CaptureSceneRender(omr.MSceneRender):
             # memory address (an int), not a bytes-like object, so it has to
             # be read out via ctypes before it means anything in Python.
             raw_ptr, row_pitch, slice_pitch = self._target.rawData()
-            print("LedFaceCapture: postSceneRender -- rawData ptr =", raw_ptr, "rowPitch", row_pitch, "slicePitch", slice_pitch)
+            _debug.log("LedFaceCapture: postSceneRender -- rawData ptr =", raw_ptr, "rowPitch", row_pitch, "slicePitch", slice_pitch)
             if not raw_ptr:
                 return
             raw_bytes = ctypes.string_at(raw_ptr, slice_pitch)
-            # Bypass the entire shading/UV/material pipeline for this check --
-            # ground truth on whether the capture itself (camera + object set
-            # + filter) contains the expected boolean-rig pattern, independent
-            # of anything happening downstream in node_led_face_material.py.
-            # RGBA8 tightly packed: every 4th byte starting at 0 is R.
-            red_channel = raw_bytes[0::4]
-            lit_count = sum(1 for v in red_channel if v > 128)
-            dark_count = len(red_channel) - lit_count
-            print(
-                "LedFaceCapture: postSceneRender -- raw pixel stats: min=%d max=%d lit(R>128)=%d dark=%d of %d"
-                % (min(raw_bytes), max(raw_bytes), lit_count, dark_count, len(red_channel))
-            )
-            # Ground truth for the Y-stretch question, no camera-API
-            # guessing involved: the rig is a 4x4 grid with EQUAL spacing in
-            # X and Y, so a diagonal on-pattern (dev_smoke_test's default:
-            # (0,0),(1,1),(2,2),(3,3)) spans the SAME world-space distance
-            # horizontally and vertically. Measure the lit-pixel bounding
-            # box directly from the raw buffer -- if width_px != height_px,
-            # the distortion is confirmed to be happening in the capture
-            # itself (camera/target), not anywhere in the display/UV/shader
-            # pipeline, and the ratio is the exact correction factor needed.
-            stride = row_pitch // 4
-            lit_rows = []
-            lit_cols = []
-            for idx, v in enumerate(red_channel):
-                if v > 128:
-                    lit_rows.append(idx // stride)
-                    lit_cols.append(idx % stride)
-            if lit_rows:
-                bbox_w = max(lit_cols) - min(lit_cols) + 1
-                bbox_h = max(lit_rows) - min(lit_rows) + 1
-                # With a non-square target (resolutionX != resolutionY on the
-                # config node), equal bbox_w/bbox_h no longer means "no
-                # distortion" -- what matters is equal FRACTIONAL coverage
-                # per axis, since the world content is square but the target
-                # pixel grid itself might not be.
-                frac_w = bbox_w / float(self._target_width)
-                frac_h = bbox_h / float(self._target_height)
-                print(
-                    "LedFaceCapture: postSceneRender -- lit-pixel bbox width=%d/%d (%.3f) "
-                    "height=%d/%d (%.3f) -- fractional ratio=%.3f (1.0 means no distortion)"
-                    % (
-                        bbox_w, self._target_width, frac_w,
-                        bbox_h, self._target_height, frac_h,
-                        frac_w / frac_h,
-                    )
+            # The pixel-bbox/aspect diagnostics below are pure-Python loops
+            # over the entire capture buffer -- measurable per-frame cost on
+            # the animation timeline, not just print() overhead, so the
+            # whole block (not only its prints) is gated behind
+            # DEBUG_ENABLED rather than running unconditionally every frame.
+            if _debug.DEBUG_ENABLED:
+                # Bypass the entire shading/UV/material pipeline for this
+                # check -- ground truth on whether the capture itself
+                # (camera + object set + filter) contains the expected
+                # content, independent of anything downstream in
+                # node_led_face_material.py. RGBA8 tightly packed: every
+                # 4th byte starting at 0 is R.
+                red_channel = raw_bytes[0::4]
+                lit_count = sum(1 for v in red_channel if v > 128)
+                dark_count = len(red_channel) - lit_count
+                _debug.log(
+                    "LedFaceCapture: postSceneRender -- raw pixel stats: min=%d max=%d lit(R>128)=%d dark=%d of %d"
+                    % (min(raw_bytes), max(raw_bytes), lit_count, dark_count, len(red_channel))
                 )
+                # Ground truth for the Y-stretch question, no camera-API
+                # guessing involved: the rig is a 4x4 grid with EQUAL
+                # spacing in X and Y, so a diagonal on-pattern
+                # (dev_smoke_test's default: (0,0),(1,1),(2,2),(3,3)) spans
+                # the SAME world-space distance horizontally and vertically.
+                # Measure the lit-pixel bounding box directly from the raw
+                # buffer -- if width_px != height_px, the distortion is
+                # confirmed to be happening in the capture itself
+                # (camera/target), not anywhere in the display/UV/shader
+                # pipeline, and the ratio is the exact correction factor
+                # needed.
+                stride = row_pitch // 4
+                lit_rows = []
+                lit_cols = []
+                for idx, v in enumerate(red_channel):
+                    if v > 128:
+                        lit_rows.append(idx // stride)
+                        lit_cols.append(idx % stride)
+                if lit_rows:
+                    bbox_w = max(lit_cols) - min(lit_cols) + 1
+                    bbox_h = max(lit_rows) - min(lit_rows) + 1
+                    # With a non-square target (resolutionX != resolutionY
+                    # on the config node), equal bbox_w/bbox_h no longer
+                    # means "no distortion" -- what matters is equal
+                    # FRACTIONAL coverage per axis, since the world content
+                    # is square but the target pixel grid itself might not
+                    # be.
+                    frac_w = bbox_w / float(self._target_width)
+                    frac_h = bbox_h / float(self._target_height)
+                    _debug.log(
+                        "LedFaceCapture: postSceneRender -- lit-pixel bbox width=%d/%d (%.3f) "
+                        "height=%d/%d (%.3f) -- fractional ratio=%.3f (1.0 means no distortion)"
+                        % (
+                            bbox_w, self._target_width, frac_w,
+                            bbox_h, self._target_height, frac_h,
+                            frac_w / frac_h,
+                        )
+                    )
             texture_name = self._config_node_fn.findPlug("textureName", False).asString()
-            texture_registry.push_frame(texture_name, self._target_width, self._target_height, raw_bytes)
-            print("LedFaceCapture: postSceneRender -- pushed frame for", repr(texture_name))
+            texture_registry.push_frame(texture_name, self._target_width, self._target_height, raw_bytes, row_pitch)
+            _debug.log("LedFaceCapture: postSceneRender -- pushed frame for", repr(texture_name))
             self._target.freeRawData(raw_ptr)
         except Exception:
             _debug.log_exception("postSceneRender")
@@ -393,7 +404,7 @@ class LedFaceCaptureOverride(omr.MRenderOverride):
     def setup(self, destination):
         try:
             config_fn = _find_config_node_fn()
-            print(
+            _debug.log(
                 "LedFaceCapture: setup() -- destination=%r config node found: %s"
                 % (destination, config_fn.name() if config_fn else None)
             )

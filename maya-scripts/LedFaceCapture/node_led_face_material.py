@@ -289,11 +289,11 @@ class LedFaceShadingNodeOverride(omr.MPxShadingNodeOverride):
         # this override would never be used to draw at all regardless of how
         # correct the fragment/wiring is -- kAllDevices rules that out.
         apis = omr.MRenderer.kAllDevices
-        print("LedFaceCapture: supportedDrawAPIs() called, returning", apis)
+        _debug.log("LedFaceCapture: supportedDrawAPIs() called, returning", apis)
         return apis
 
     def fragmentName(self):
-        print("LedFaceCapture: LedFaceShadingNodeOverride.fragmentName() called")
+        _debug.log("LedFaceCapture: LedFaceShadingNodeOverride.fragmentName() called")
         return FRAGMENT_NAME
 
     def outputForConnection(self, source_plug, destination_plug):
@@ -302,18 +302,19 @@ class LedFaceShadingNodeOverride(omr.MPxShadingNodeOverride):
         # confirmed via help() that a mismatch here means "the fragment will
         # not be connected to the overall shading effect" at all, which
         # produces exactly a solid-black render item with no error anywhere.
-        try:
-            source_name = source_plug.name()
-        except Exception:
-            source_name = repr(source_plug)
-        try:
-            dest_name = destination_plug.name()
-        except Exception:
-            dest_name = repr(destination_plug)
-        print(
-            "LedFaceCapture: outputForConnection() called, source=%s dest=%s -> returning %r"
-            % (source_name, dest_name, FRAGMENT_NAME)
-        )
+        if _debug.DEBUG_ENABLED:
+            try:
+                source_name = source_plug.name()
+            except Exception:
+                source_name = repr(source_plug)
+            try:
+                dest_name = destination_plug.name()
+            except Exception:
+                dest_name = repr(destination_plug)
+            _debug.log(
+                "LedFaceCapture: outputForConnection() called, source=%s dest=%s -> returning %r"
+                % (source_name, dest_name, FRAGMENT_NAME)
+            )
         return FRAGMENT_NAME
 
     def updateDG(self):
@@ -339,7 +340,7 @@ class LedFaceShadingNodeOverride(omr.MPxShadingNodeOverride):
     def updateShader(self, shader, mappings):
         try:
             texture = texture_registry.get_texture(self._texture_name)
-            print(
+            _debug.log(
                 "LedFaceCapture: updateShader() textureName=%r -> texture=%r"
                 % (self._texture_name, texture)
             )

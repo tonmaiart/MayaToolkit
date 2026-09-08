@@ -1,13 +1,12 @@
 """In-memory registry mapping a name to the live MTexture used by ledFaceMaterial nodes.
 
 Nothing here ever touches disk: capture pixels flow render target -> RAM bytes
--> MTexture, and the same registry entry is rebound into the viewport shader
-every refresh. There is no `file` node and no image asset anywhere in this
+-> MTexture, updated in place frame to frame wherever possible (see
+push_frame()). There is no `file` node and no image asset anywhere in this
 pipeline.
 """
 from __future__ import annotations
 
-import maya.api.OpenMaya as om2
 import maya.api.OpenMayaRender as omr
 import maya.cmds as cmds
 
@@ -38,17 +37,28 @@ class _Entry(object):
 _ENTRIES = {}
 
 
-def push_frame(name, width, height, rgba_bytes):
+def push_frame(name, width, height, rgba_bytes, row_pitch=None):
     """Upload a fresh RGBA8 frame for `name`, replacing whatever texture was there.
 
-    rgba_bytes must be width*height*4 bytes, row-major, top row first.
+    rgba_bytes must be width*height*4 bytes (or row_pitch*height if the
+    source buffer has row padding -- see MTexture.update()'s rowPitch
+    parameter below). row_pitch defaults to tightly packed (width*4) when
+    omitted.
 
-    MTexture has no single documented in-place pixel-update entry point that
-    is stable across Maya versions, so the safe approach used here is:
-    acquire a brand new texture object from the raw buffer every frame and
-    release the previous one. acquireTexture()'s raw-data overload builds the
-    GPU resource directly from the bytes passed in -- no file, no disk round
-    trip involved.
+    Reuses the existing GPU texture for `name` via MTexture.update() (an
+    in-place upload onto the SAME GPU resource) whenever one already exists
+    at the same dimensions -- an earlier version of this module assumed
+    "MTexture has no single documented in-place pixel-update entry point
+    that is stable across Maya versions" and unconditionally released the
+    old texture and acquired a brand new GPU resource every single pushed
+    frame instead. That assumption was wrong: MTexture.update() is a real,
+    documented entry point (maya/MTextureManager.h in the Maya devkit
+    headers) -- confirmed present in the Maya 2026 SDK, not just guessed.
+    Releasing + reallocating a GPU texture every frame during Play is
+    measurably heavier than an in-place update, so this only falls back to
+    the old allocate-a-new-texture behaviour when there's no existing
+    texture yet, its size changed, or the in-place update raises (format
+    mismatch, older Maya version without this entry point, etc.).
     """
     if not name:
         return
@@ -56,6 +66,21 @@ def push_frame(name, width, height, rgba_bytes):
     texture_manager = omr.MRenderer.getTextureManager()
     if texture_manager is None:
         return
+
+    if row_pitch is None:
+        row_pitch = width * 4
+
+    entry = _ENTRIES.get(name)
+    if entry is not None and entry.texture is not None and entry.width == width and entry.height == height:
+        try:
+            entry.texture.update(rgba_bytes, False, row_pitch)
+            _mark_consumers_dirty(name)
+            return
+        except Exception:
+            _debug.log_exception(
+                "texture_registry.push_frame -- in-place MTexture.update() failed, "
+                "falling back to acquiring a new texture this frame"
+            )
 
     desc = omr.MTextureDescription()
     desc.setToDefault2DTexture()
@@ -69,9 +94,8 @@ def push_frame(name, width, height, rgba_bytes):
     if new_texture is None:
         return
 
-    old_entry = _ENTRIES.get(name)
-    if old_entry is not None and old_entry.texture is not None:
-        texture_manager.releaseTexture(old_entry.texture)
+    if entry is not None and entry.texture is not None:
+        texture_manager.releaseTexture(entry.texture)
 
     _ENTRIES[name] = _Entry(new_texture, width, height)
     _mark_consumers_dirty(name)
@@ -91,15 +115,22 @@ def _mark_consumers_dirty(name):
     package) so this is wrapped defensively; if it turns out to be unsafe
     here, the fix is to drive this from a main-thread idle callback instead
     of from postSceneRender directly.
+
+    This runs once per pushed frame -- during Play, every frame. The
+    previous implementation walked EVERY plugin node in the whole scene
+    (`MItDependencyNodes(kPluginDependNode)` -- any plugin's nodes, not just
+    ours) and issued one cmds.dgdirty() call per match; on a scene with
+    other plugins' nodes in it (Arnold shaders, other rigs, ...) that's a
+    lot of wasted Python-level type-name string comparisons every frame.
+    cmds.ls(type=...) is natively type-indexed in C++ so it only ever
+    touches ledFaceMaterial nodes, and matches get dirtied in one batched
+    call instead of N separate command-engine round trips.
     """
     try:
-        iterator = om2.MItDependencyNodes(om2.MFn.kPluginDependNode)
-        while not iterator.isDone():
-            node_fn = om2.MFnDependencyNode(iterator.thisNode())
-            if node_fn.typeName == _LED_FACE_MATERIAL_TYPE:
-                if node_fn.findPlug("textureName", False).asString() == name:
-                    cmds.dgdirty(node_fn.name())
-            iterator.next()
+        candidates = cmds.ls(type=_LED_FACE_MATERIAL_TYPE) or []
+        matches = [node for node in candidates if cmds.getAttr(node + ".textureName") == name]
+        if matches:
+            cmds.dgdirty(matches)
     except Exception:
         _debug.log_exception("texture_registry._mark_consumers_dirty")
 

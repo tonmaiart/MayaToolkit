@@ -20,6 +20,26 @@ from __future__ import annotations
 
 import traceback
 
+# Every render-callback method in this package (cameraOverride,
+# objectSetOverride, postSceneRender, updateShader, ...) runs once per
+# redraw -- during Play that's every single frame. Unconditional print()
+# calls in there were measurable overhead on the animation timeline (each
+# one is a Script Editor write, not free), on top of postSceneRender's
+# per-pixel diagnostic loop being pure Python over the whole capture
+# buffer. Both are now gated behind this flag, off by default. Flip it on
+# from the Script Editor when you actually need the trace back:
+#     import LedFaceCapture._debug as debug
+#     debug.DEBUG_ENABLED = True
+DEBUG_ENABLED = False
+
+
+def log(*args):
+    """print()-equivalent for per-frame render-callback tracing, gated
+    behind DEBUG_ENABLED so it costs nothing during normal playback.
+    """
+    if DEBUG_ENABLED:
+        print(*args)
+
 
 def log_exception(context):
     print("LedFaceCapture [{}]:\n{}".format(context, traceback.format_exc()))
