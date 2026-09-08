@@ -150,17 +150,19 @@ def _build_material_and_preview(camera_transform, capture_set):
     # itself -- the lambert is what Maya actually knows how to draw
     # correctly; ledFaceMaterial only needs to contribute one input to it.
     #
-    # cameraName/captureSetName/resolutionX/Y used to live on a separate
+    # cameraMsg/captureSetMsg/resolutionX/Y used to live on a separate
     # ledCaptureConfig node -- they're now attributes directly on
     # ledFaceMaterial itself, so one node fully describes both "how to
     # capture" and "how to display" this texture channel (see
-    # node_led_face_material.py). Setting them here is what makes this
+    # node_led_face_material.py). cameraMsg/captureSetMsg are message
+    # attributes, connected (not set as strings) -- a string doesn't survive
+    # `file -reference`, a DG connection does. Wiring them is what makes this
     # channel show up in render_override.py's per-frame scan for capture
     # channels at all.
     shader = cmds.shadingNode("ledFaceMaterial", asUtility=True, name=_name("mat"))
     cmds.setAttr(shader + ".textureName", TEXTURE_NAME, type="string")
-    cmds.setAttr(shader + ".cameraName", camera_transform, type="string")
-    cmds.setAttr(shader + ".captureSetName", capture_set, type="string")
+    cmds.connectAttr(camera_transform + ".message", shader + ".cameraMsg", force=True)
+    cmds.connectAttr(capture_set + ".message", shader + ".captureSetMsg", force=True)
     cmds.setAttr(shader + ".resolutionX", 64)
     cmds.setAttr(shader + ".resolutionY", 64)
 

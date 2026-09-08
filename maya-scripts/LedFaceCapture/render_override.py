@@ -101,26 +101,32 @@ def _compose_atlases():
         _debug.log_exception("_compose_atlases")
 
 
-def _resolve_dag_path(name):
-    """Resolves `name` to a dag path, nudged onto its shape if it has one.
-
-    Accepts either a camera's transform or shape name -- cameraOverride
-    wants the camera itself, and extendToShape() is a no-op (raises, caught
-    below) if `name` was already a shape or has none.
+def _connected_camera_dag_path(config_node_fn):
+    """Resolves the camera via the `cameraMsg` message-attribute connection
+    (see node_led_face_material.py's initialize()). This replaced a legacy
+    `cameraName` string attribute (removed) -- connections survive
+    `file -reference` (Maya remaps them through the reference's namespace
+    automatically), which is exactly what a plain string attribute never
+    did. Returns None (not an exception) when nothing's wired up, e.g. an
+    unset config node.
     """
-    if not name:
-        return None
-    sel = om2.MSelectionList()
     try:
-        sel.add(name)
-    except RuntimeError:
+        plug = config_node_fn.findPlug("cameraMsg", False)
+        source_plug = plug.source()
+        if source_plug.isNull:
+            return None
+        node = source_plug.node()
+        if node.isNull():
+            return None
+        dag_path = om2.MDagPath.getAPathTo(node)
+        try:
+            dag_path.extendToShape()
+        except RuntimeError:
+            pass
+        return dag_path
+    except Exception:
+        _debug.log_exception("_connected_camera_dag_path")
         return None
-    path = sel.getDagPath(0)
-    try:
-        path.extendToShape()
-    except RuntimeError:
-        pass
-    return path
 
 
 def _orthographic_projection_matrix(half_width, half_height, near_clip, far_clip):
@@ -145,31 +151,34 @@ def _orthographic_projection_matrix(half_width, half_height, near_clip, far_clip
     ])
 
 
-def _resolve_selection_list(name):
-    """objectSetOverride wants an MSelectionList (confirmed: passing a bare
-    MObject raised `MSelectionList expected` on Maya 2026) -- but ground
-    truth from raw-pixel diagnostics shows the capture pass rendering
-    literally nothing (0 lit pixels) no matter what shader/lighting the rig
-    cubes use, which is exactly what "the list contains the *set node*
-    itself" would produce: a set node has no shape to draw, so restricting
-    the scene to "just this one non-renderable node" is indistinguishable
-    from restricting it to nothing. "the set of objects to view" in the docs
-    reads as the flattened membership, not a set-node reference -- expand it
-    via MFnSet.getMembers() instead of handing back the bare set node.
+def _connected_capture_set_members(config_node_fn):
+    """Resolves the capture set via the `captureSetMsg` message-attribute
+    connection (see node_led_face_material.py's initialize()). This replaced
+    a legacy `captureSetName` string attribute (removed) -- same referencing
+    rationale as _connected_camera_dag_path(): a set's name never survived
+    `file -reference` either. objectSetOverride wants an MSelectionList
+    (confirmed: passing a bare MObject raised `MSelectionList expected` on
+    Maya 2026) containing the set's flattened membership, not the set node
+    itself -- a set node has no shape to draw, so restricting the scene to
+    "just this one non-renderable node" is indistinguishable from
+    restricting it to nothing (confirmed via ground-truth raw-pixel
+    diagnostics: 0 lit pixels until this was fixed to expand via
+    MFnSet.getMembers()). Returns None (not an exception) when nothing's
+    wired up.
     """
-    if not name:
-        return None
-    sel = om2.MSelectionList()
     try:
-        sel.add(name)
-    except RuntimeError:
-        return None
-    try:
-        set_fn = om2.MFnSet(sel.getDependNode(0))
+        plug = config_node_fn.findPlug("captureSetMsg", False)
+        source_plug = plug.source()
+        if source_plug.isNull:
+            return None
+        node = source_plug.node()
+        if node.isNull():
+            return None
+        set_fn = om2.MFnSet(node)
         return set_fn.getMembers(True)
     except Exception:
-        _debug.log_exception("_resolve_selection_list")
-        return sel
+        _debug.log_exception("_connected_capture_set_members")
+        return None
 
 
 class _CaptureSceneRender(omr.MSceneRender):
@@ -212,8 +221,7 @@ class _CaptureSceneRender(omr.MSceneRender):
 
     def cameraOverride(self):
         try:
-            camera_name = self._config_node_fn.findPlug("cameraName", False).asString()
-            dag_path = _resolve_dag_path(camera_name)
+            dag_path = _connected_camera_dag_path(self._config_node_fn)
             if dag_path is None:
                 return None
             # MFnCamera on this Maya build exposes neither the attribute nor
@@ -254,8 +262,7 @@ class _CaptureSceneRender(omr.MSceneRender):
 
     def objectSetOverride(self):
         try:
-            set_name = self._config_node_fn.findPlug("captureSetName", False).asString()
-            sel = _resolve_selection_list(set_name)
+            sel = _connected_capture_set_members(self._config_node_fn)
             # This runs every redraw -- during Play that's every frame, so
             # the member-listing walk below (only useful for confirming a
             # wrong/empty capture set) is gated the same as its print,
@@ -274,8 +281,8 @@ class _CaptureSceneRender(omr.MSceneRender):
                     except Exception:
                         member_names = ["<MItSelectionList failed>"]
                 _debug.log(
-                    "LedFaceCapture: _CaptureSceneRender.objectSetOverride() called, set_name=%r sel=%r members=%s"
-                    % (set_name, sel, member_names)
+                    "LedFaceCapture: _CaptureSceneRender.objectSetOverride() called, sel=%r members=%s"
+                    % (sel, member_names)
                 )
             return sel
         except Exception:

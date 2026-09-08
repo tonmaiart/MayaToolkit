@@ -248,8 +248,8 @@ class LedFaceMaterial(om2.MPxNode):
 
     textureName = None
     outColor = None
-    cameraName = None
-    captureSetName = None
+    cameraMsg = None
+    captureSetMsg = None
     resolutionX = None
     resolutionY = None
     atlasSources = None
@@ -283,24 +283,27 @@ class LedFaceMaterial(om2.MPxNode):
         # override can drive an arbitrary number of independent capture
         # passes (one per distinct textureName found on any ledFaceMaterial
         # in the scene) instead of only ever the single ledCaptureConfig
-        # node it used to look for. Same attribute names/short names as the
-        # old node, on purpose -- render_override.py's findPlug() calls
-        # didn't need to change at all.
-        str_fn = om2.MFnTypedAttribute()
-        LedFaceMaterial.cameraName = str_fn.create(
-            "cameraName", "cam", om2.MFnData.kString, default_string
-        )
-        str_fn.storable = True
-        str_fn.keyable = False
-        om2.MPxNode.addAttribute(LedFaceMaterial.cameraName)
+        # node it used to look for.
+        #
+        # cameraName/captureSetName (plain string attrs) were removed: a
+        # string doesn't survive `file -reference` -- the referenced
+        # camera/set gets a namespace prefix (or collides with another
+        # reference's copy) and the string still holds the old
+        # un-namespaced text, so render_override.py's MSelectionList.add()
+        # lookup started failing or resolving to the wrong node. These
+        # message attributes replace them: connect the camera/set's
+        # `.message` here (`cmds.connectAttr(cam + ".message", node + ".cameraMsg")`,
+        # same for captureSetMsg) instead. A real DG connection has none of
+        # the string's problem -- Maya rewrites/remaps connections through
+        # reference namespaces automatically, the same mechanism every other
+        # node-to-node wire in the scene already relies on.
+        msg_fn = om2.MFnMessageAttribute()
+        LedFaceMaterial.cameraMsg = msg_fn.create("cameraMsg", "camMsg")
+        om2.MPxNode.addAttribute(LedFaceMaterial.cameraMsg)
 
-        str_fn = om2.MFnTypedAttribute()
-        LedFaceMaterial.captureSetName = str_fn.create(
-            "captureSetName", "capSet", om2.MFnData.kString, default_string
-        )
-        str_fn.storable = True
-        str_fn.keyable = False
-        om2.MPxNode.addAttribute(LedFaceMaterial.captureSetName)
+        msg_fn = om2.MFnMessageAttribute()
+        LedFaceMaterial.captureSetMsg = msg_fn.create("captureSetMsg", "capSetMsg")
+        om2.MPxNode.addAttribute(LedFaceMaterial.captureSetMsg)
 
         num_fn = om2.MFnNumericAttribute()
         LedFaceMaterial.resolutionX = num_fn.create(

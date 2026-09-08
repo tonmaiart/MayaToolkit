@@ -140,10 +140,16 @@ code.
 - `node_led_face_material.py` -- `ledFaceMaterial` node (assignable as a
   utility node) + `LedFaceShadingNodeOverride`, which rebinds whatever
   texture `texture_registry` holds for its `textureName` into VP2's draw
-  every refresh. Also carries its own capture config (`cameraName`,
-  `captureSetName`, `resolutionX/Y`) -- there is no separate config node
-  type; one `ledFaceMaterial` node fully describes one capture channel, and
-  a scene can have any number of them (e.g. one per eye) active at once.
+  every refresh. Also carries its own capture config (`cameraMsg`/
+  `captureSetMsg` -- message-attribute connections to the capture camera and
+  object set; `resolutionX/Y`) -- there is no separate config node type; one
+  `ledFaceMaterial` node fully describes one capture channel, and a scene can
+  have any number of them (e.g. one per eye) active at once. There used to be
+  `cameraName`/`captureSetName` string attributes here instead -- removed:
+  a plain string doesn't survive `file -reference` (the referenced
+  camera/set gets namespaced, the string doesn't follow), so any scene built
+  before this change must be re-wired with `connectAttr` (see below) or its
+  capture channel silently stops resolving a camera/set.
 - `render_override.py` -- `LedFaceCaptureOverride`, an `MRenderOverride` that
   adds one extra offscreen `MSceneRender` pass per distinct `textureName`
   found on any `ledFaceMaterial` in the scene (camera + object-set override
@@ -163,8 +169,11 @@ LedFaceCapture.load()
 # One node describes both "how to capture" and "how to display" this
 # channel -- assign it, then set its capture config + textureName.
 shader = cmds.shadingNode("ledFaceMaterial", asUtility=True, name="robotFaceLED_mat")
-cmds.setAttr(shader + ".cameraName", "ledCaptureCam", type="string")         # your ortho cam's transform
-cmds.setAttr(shader + ".captureSetName", "ledRigCaptureSet", type="string")  # object set containing the boolean rig geo
+# Connect the camera and the capture set instead of typing their names -- a
+# plain string doesn't survive `file -reference` (the referenced node gets
+# namespaced, the string doesn't follow), a DG connection does.
+cmds.connectAttr("ledCaptureCam.message", shader + ".cameraMsg")
+cmds.connectAttr("ledRigCaptureSet.message", shader + ".captureSetMsg")
 cmds.setAttr(shader + ".textureName", "robotFaceLED", type="string")
 cmds.setAttr(shader + ".resolutionX", 64)
 cmds.setAttr(shader + ".resolutionY", 64)
