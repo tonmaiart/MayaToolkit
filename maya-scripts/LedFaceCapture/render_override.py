@@ -38,6 +38,43 @@ from .node_led_face_material import NODE_NAME as MATERIAL_NODE_NAME
 OVERRIDE_NAME = "ledFaceCaptureOverride"
 
 
+def _apply_viewport_background(clear_op):
+    """Mirrors Maya's own Viewport 2.0 background (Display > Viewport
+    Background, or right-click panel > Change Background Color) onto
+    `clear_op`. Called every setup() so a background color/gradient change
+    made through Maya's own UI while this override is active takes effect
+    on the next redraw -- this override replaces Maya's whole operation
+    list, so nothing else reads that preference for us.
+
+    displayRGBColor's query form returns [r, g, b] (0-1 floats); solid vs.
+    gradient is whatever displayPref's displayGradient flag says, same as
+    the stock viewport.
+    """
+    try:
+        use_gradient = bool(cmds.displayPref(query=True, displayGradient=True))
+    except Exception:
+        _debug.log_exception("_apply_viewport_background displayPref")
+        use_gradient = False
+    try:
+        if use_gradient:
+            top = cmds.displayRGBColor("backgroundTop", query=True)
+            bottom = cmds.displayRGBColor("backgroundBottom", query=True)
+            clear_op.setClearColor((bottom[0], bottom[1], bottom[2], 1.0))
+            clear_op.setClearColor2((top[0], top[1], top[2], 1.0))
+            clear_op.setClearGradient(True)
+            _debug.log(
+                "LedFaceCapture: _apply_viewport_background -- gradient top=%s bottom=%s"
+                % (top, bottom)
+            )
+        else:
+            bg = cmds.displayRGBColor("background", query=True)
+            clear_op.setClearColor((bg[0], bg[1], bg[2], 1.0))
+            clear_op.setClearGradient(False)
+            _debug.log("LedFaceCapture: _apply_viewport_background -- solid bg=%s" % (bg,))
+    except Exception:
+        _debug.log_exception("_apply_viewport_background")
+
+
 def _find_capture_configs():
     """One MFnDependencyNode per distinct textureName among every
     ledFaceMaterial node in the scene -- there is no separate config node
@@ -466,13 +503,38 @@ class _CaptureSceneRender(omr.MSceneRender):
             _debug.log_exception("_CaptureSceneRender.release")
 
 
+class _MainSceneRender(omr.MSceneRender):
+    """The visible main-scene pass. A plain, un-subclassed MSceneRender used
+    here previously has its OWN internal default clearOperation() (confirmed
+    live: with the standalone MClearOperation set to grey and this pass left
+    as a bare MSceneRender, the viewport still rendered pure black) that
+    runs when this operation's turn comes up and clobbers whatever the
+    earlier standalone MClearOperation already painted -- both defaulted to
+    black, which is why this went unnoticed until the clear color was
+    changed away from black. Overriding clearOperation() to hand back the
+    override's own (viewport-background-synced) clear op, same pattern as
+    _CaptureSceneRender below, makes this pass's own clear agree with it
+    instead of silently overriding it back to black.
+    """
+
+    def __init__(self, name, clear_op):
+        omr.MSceneRender.__init__(self, name)
+        self._clear_op = clear_op
+
+    def clearOperation(self):
+        return self._clear_op
+
+
 class LedFaceCaptureOverride(omr.MRenderOverride):
     def __init__(self):
         omr.MRenderOverride.__init__(self, OVERRIDE_NAME)
         self._clear_op = omr.MClearOperation("ledFaceClear")
+        # Actual color/gradient is synced from Maya's own Viewport 2.0
+        # background preference in setup() -> _apply_viewport_background();
+        # this is just a safe initial value before the first setup() call.
         self._clear_op.setClearColor((0.0, 0.0, 0.0, 1.0))
         self._clear_op.setClearGradient(False)
-        self._main_scene_op = omr.MSceneRender("ledFaceMainScene")
+        self._main_scene_op = _MainSceneRender("ledFaceMainScene", self._clear_op)
         self._present_op = omr.MPresentTarget("ledFacePresent")
         # One _CaptureSceneRender per distinct textureName, keyed by that
         # name -- an arbitrary number of independent capture channels (e.g.
@@ -480,7 +542,11 @@ class LedFaceCaptureOverride(omr.MRenderOverride):
         # active at once, each running as its own operation ahead of the
         # shared main-scene pass.
         self._capture_ops = {}
-        self._operations = [self._clear_op, self._main_scene_op, self._present_op]
+        # self._clear_op is not listed as its own operation here any more --
+        # _MainSceneRender.clearOperation() above ties it directly to the
+        # main-scene pass instead, which is what Maya's render loop actually
+        # honors (see _MainSceneRender's docstring).
+        self._operations = [self._main_scene_op, self._present_op]
         self._operation_index = 0
 
     def uiName(self):
@@ -491,6 +557,7 @@ class LedFaceCaptureOverride(omr.MRenderOverride):
 
     def setup(self, destination):
         try:
+            _apply_viewport_background(self._clear_op)
             _compose_atlases()
 
             configs = _find_capture_configs()
@@ -526,7 +593,7 @@ class LedFaceCaptureOverride(omr.MRenderOverride):
 
             self._operations = (
                 list(self._capture_ops.values())
-                + [self._clear_op, self._main_scene_op, self._present_op]
+                + [self._main_scene_op, self._present_op]
             )
             self._operation_index = 0
         except Exception:
