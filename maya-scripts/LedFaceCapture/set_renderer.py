@@ -27,6 +27,10 @@ PLUGIN_NAME = "led_face_capture"
 OVERRIDE_NAME = "ledFaceCaptureOverride"
 
 
+def _show_message(text):
+    cmds.inViewMessage(amg=text, pos="topCenter", fade=True, fadeStayTime=1500)
+
+
 def _resolve_panels(panel):
     """None/omitted -> the focused model panel (falls back to the first one
     that exists). "all" -> every model panel. Anything else -> that one
@@ -57,6 +61,7 @@ def use_led_face_capture(panel=None):
     for p in panels:
         cmds.modelEditor(p, edit=True, rendererOverrideName=OVERRIDE_NAME)
         print("LedFaceCapture: {} -> LED Face Capture".format(p))
+    _show_message("Viewport renderer: <hl>LED Face Capture</hl>")
 
 
 def use_viewport2(panel=None):
@@ -74,3 +79,4 @@ def use_viewport2(panel=None):
     for p in panels:
         cmds.modelEditor(p, edit=True, rendererOverrideName="")
         print("LedFaceCapture: {} -> Viewport 2.0".format(p))
+    _show_message("Viewport renderer: <hl>Viewport 2.0</hl>")
