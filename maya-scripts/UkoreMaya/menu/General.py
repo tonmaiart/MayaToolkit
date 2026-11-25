@@ -582,7 +582,7 @@ def lock_attribute():
 
     for obj in targets:
         for attr in attrs:
-            obj.setAttr(attr, lock=True, keyable=False)
+            cmds.setAttr("{}.{}".format(obj, attr), lock=True, keyable=False)
 
     cmds.inViewMessage(
         amg="Locked Attributes for: <hl>{}</hl>".format(
@@ -609,7 +609,7 @@ def unlock_attribute():
 
     for obj in targets:
         for attr in attrs:
-            obj.setAttr(attr, lock=False, keyable=True)
+            cmds.setAttr("{}.{}".format(obj, attr), lock=False, keyable=True)
 
     cmds.inViewMessage(
         amg="Unlocked Attributes for: <hl>{}</hl>".format(

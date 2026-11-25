@@ -355,11 +355,8 @@ def split_blendshape(
     dict_base_geo_vtxs = {}
     dict_target_geo_vtxs = {}
 
-    target_mesh_node = cmds.PyNode(target_mesh)
-    target_mesh_name = target_mesh_node.shortName()
-    base_mesh_node = cmds.PyNode(base_mesh)
-    source_vtxs = base_mesh_node.vtx
-    source_count = len(source_vtxs)
+    target_mesh_name = cmds.ls(target_mesh)[0]
+    source_count = cmds.polyEvaluate(base_mesh, vertex=True)
 
     MSelectionList = om.MSelectionList()
 
@@ -518,9 +515,9 @@ def get_meshes_with_blendshape(blendshape_node):
     mesh_shapes = cmds.ls(type="mesh")
 
     for shape in mesh_shapes:
-        history = cmds.listHistory(shape, pruneDagObjects=True)
+        history = cmds.listHistory(shape, pruneDagObjects=True) or []
         if blendshape_node in history:
-            transform = shape.getParent()
+            transform = cmds.listRelatives(shape, p=1)[0]
             result.append(transform)
 
     return result

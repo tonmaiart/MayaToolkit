@@ -186,11 +186,11 @@ def get_world_matrix(obj):
 
 def match_transform(target_object, match_object, pos=True, rot=True, scale=True):
     """
-    Match the world-space transforms of one Maya object to another using PyMEL.
+    Match the world-space transforms of one Maya object to another.
 
     Args:
-        target_object (str or cmds.PyNode): Target object to receive the transform.
-        match_object (str or cmds.PyNode): Source object to copy the transform from.
+        target_object (str): Target object to receive the transform.
+        match_object (str): Source object to copy the transform from.
         pos (bool): If True, match position.
         rot (bool): If True, match rotation.
         scale (bool): If True, match scale.
@@ -199,21 +199,20 @@ def match_transform(target_object, match_object, pos=True, rot=True, scale=True)
         RuntimeError: If either of the specified objects does not exist.
 
     """
-    # Get PyNodes for both
-    target = cmds.PyNode(target_object)
-    source = cmds.PyNode(match_object)
+    target = str(target_object)
+    source = str(match_object)
 
-    # Match world-space position
-    if pos:
-        target.setTranslation(source.getTranslation(space="world"), space="world")
+    for obj in (target, source):
+        if not cmds.objExists(obj):
+            raise RuntimeError("Object does not exist: {}".format(obj))
 
-    # Match world-space rotation
-    if rot:
-        target.setRotation(source.getRotation(space="world"), space="world")
+    # Match world-space position / rotation
+    if pos or rot:
+        cmds.matchTransform(target, source, pos=pos, rot=rot)
 
-    # Match scale (relative)
+    # Match scale (local values)
     if scale:
-        target.scale.set(source.scale.get())
+        cmds.setAttr(target + ".s", *cmds.getAttr(source + ".s")[0], typ="double3")
 
 
 def reset_transform(obj, pos=True, rot=True, scl=True):
@@ -358,25 +357,22 @@ def transform_to_surface_parameter(
     Snap a target Transform to a NURBS surface at a given U/V.
 
     Args:
-        source (cmds.nt.NurbsSurface): The NURBS surface shape.
-        target (cmds.nt.Transform): The transform to snap.
+        source (str): The NURBS surface (shape or transform).
+        target (str): The transform to snap.
         u (float): U parameter.
         v (float): V parameter.
         percentage (bool): If True, interpret U/V as 0-1 percentage.
         snap (str): "parent" to match position & rotation, "point" for position only.
 
     Raises:
-        TypeError: If source is not a cmds.nt.NurbsSurface or target is not a cmds.nt.Transform.
+        Exception: If source has no nurbsSurface shape.
     """
 
-    if not Utility.is_py_node(source):
-        source = cmds.PyNode(source)
+    source = str(source)
+    target = str(target)
 
-    if not Utility.is_py_node(target):
-        target = cmds.PyNode(target)
-
-    if source.nodeType() != "nurbsSurface":
-        shape = cmds.listRelatives(source, c=1, s=1, typ="nurbsSurface")
+    if cmds.nodeType(source) != "nurbsSurface":
+        shape = cmds.listRelatives(source, c=1, s=1, typ="nurbsSurface", f=1)
 
         if shape:
             source = shape[0]
@@ -389,35 +385,39 @@ def transform_to_surface_parameter(
     decomp = cmds.createNode("decomposeMatrix")
 
     # Connect surface and params
-    source.worldSpace[0] >> poc.inputSurface
-    poc.parameterU.set(u)
-    poc.parameterV.set(v)
-    poc.turnOnPercentage.set(percentage)
+    cmds.connectAttr(source + ".worldSpace[0]", poc + ".inputSurface")
+    cmds.setAttr(poc + ".parameterU", u)
+    cmds.setAttr(poc + ".parameterV", v)
+    cmds.setAttr(poc + ".turnOnPercentage", percentage)
 
     # Fill the matrix with surface vectors and position
-    poc.positionX >> fmatrix.in30
-    poc.positionY >> fmatrix.in31
-    poc.positionZ >> fmatrix.in32
-    poc.normalX >> fmatrix.in00
-    poc.normalY >> fmatrix.in01
-    poc.normalZ >> fmatrix.in02
-    poc.tangentUx >> fmatrix.in10
-    poc.tangentUy >> fmatrix.in11
-    poc.tangentUz >> fmatrix.in12
-    poc.tangentVx >> fmatrix.in20
-    poc.tangentVy >> fmatrix.in21
-    poc.tangentVz >> fmatrix.in22
+    list_connect = [
+        ("positionX", "in30"),
+        ("positionY", "in31"),
+        ("positionZ", "in32"),
+        ("normalX", "in00"),
+        ("normalY", "in01"),
+        ("normalZ", "in02"),
+        ("tangentUx", "in10"),
+        ("tangentUy", "in11"),
+        ("tangentUz", "in12"),
+        ("tangentVx", "in20"),
+        ("tangentVy", "in21"),
+        ("tangentVz", "in22"),
+    ]
+    for attr_poc, attr_matrix in list_connect:
+        cmds.connectAttr(poc + "." + attr_poc, fmatrix + "." + attr_matrix)
 
-    fmatrix.output >> decomp.inputMatrix
+    cmds.connectAttr(fmatrix + ".output", decomp + ".inputMatrix")
 
     # Get the results
-    translate = decomp.outputTranslate.get()
-    rotate = decomp.outputRotate.get()
+    translate = cmds.getAttr(decomp + ".outputTranslate")[0]
+    rotate = cmds.getAttr(decomp + ".outputRotate")[0]
 
     # Apply the transformation
-    target.translate.set(translate)
+    cmds.setAttr(target + ".translate", *translate, typ="double3")
     if snap == "parent":
-        target.rotate.set(rotate)
+        cmds.setAttr(target + ".rotate", *rotate, typ="double3")
 
     # Clean up utility nodes
     cmds.delete([poc, fmatrix, decomp])

@@ -222,56 +222,67 @@ def create_switch_enum_matrix(
 def create_switch_float(
     target1, target2, object, controller, attr_name="space", typ="orient"
 ):
+    # Track nodes by UUID: names can clash (both locators share a base name,
+    # leftovers from earlier runs) and paths change on every re-parent.
+    def _uuid(node):
+        return cmds.ls(node, uuid=True)[0]
+
+    def _path(uuid):
+        return cmds.ls(uuid, l=True)[0]
+
     node_rev = cmds.createNode("reverse", n="node_rev")
 
-    locatorFrz1 = cmds.spaceLocator(n="loc_{}SpaceFrz".format(object))
-    locatorFrz2 = cmds.spaceLocator(n="loc_{}SpaceFrz".format(object))
+    locatorFrz1 = _uuid(cmds.spaceLocator(n="loc_{}SpaceFrz1".format(object))[0])
+    locatorFrz2 = _uuid(cmds.spaceLocator(n="loc_{}SpaceFrz2".format(object))[0])
 
-    locator1 = cmds.spaceLocator(n="loc_{}Space".format(object))
-    locator2 = cmds.spaceLocator(n="loc_{}Space".format(object))
+    locator1 = _uuid(cmds.spaceLocator(n="loc_{}Space1".format(object))[0])
+    locator2 = _uuid(cmds.spaceLocator(n="loc_{}Space2".format(object))[0])
 
-    cmds.setAttr(locatorFrz1 + ".inheritsTransform", 0)
-    cmds.setAttr(locatorFrz2 + ".inheritsTransform", 0)
-
-    cmds.setAttr(locatorFrz1 + ".v", 0)
-    cmds.setAttr(locatorFrz2 + ".v", 0)
+    for loc_frz in (locatorFrz1, locatorFrz2):
+        cmds.setAttr(_path(loc_frz) + ".inheritsTransform", 0)
+        cmds.setAttr(_path(loc_frz) + ".v", 0)
 
     cmds.connectAttr(
-        "{}.worldMatrix[0]".format(target1), "{}.offsetParentMatrix".format(locatorFrz1)
+        "{}.worldMatrix[0]".format(target1),
+        "{}.offsetParentMatrix".format(_path(locatorFrz1)),
     )
     cmds.connectAttr(
-        "{}.worldMatrix[0]".format(target2), "{}.offsetParentMatrix".format(locatorFrz2)
+        "{}.worldMatrix[0]".format(target2),
+        "{}.offsetParentMatrix".format(_path(locatorFrz2)),
     )
 
-    cmds.parent(locator1, locatorFrz1)
-    cmds.parent(locator2, locatorFrz2)
+    cmds.parent(_path(locator1), _path(locatorFrz1))
+    cmds.parent(_path(locator2), _path(locatorFrz2))
 
-    cmds.matchTransform(locator1, object)
-    cmds.matchTransform(locator2, object)
+    cmds.matchTransform(_path(locator1), object)
+    cmds.matchTransform(_path(locator2), object)
 
     grp_blend = Create.create_freeze_group([object], "grpBlend")[0]
 
-    cmds.parent(locatorFrz1, locatorFrz2, grp_blend)
+    cmds.parent(_path(locatorFrz1), _path(locatorFrz2), grp_blend)
 
     if typ == "parent":
-        cons = cmds.parentConstraint(locator1, locator2, grp_blend)
+        constraint_cmd = cmds.parentConstraint
     elif typ == "orient":
-        cons = cmds.orientConstraint(locator1, locator2, grp_blend)
+        constraint_cmd = cmds.orientConstraint
     elif typ == "point":
-        cons = cmds.pointConstraint(locator1, locator2, grp_blend)
+        constraint_cmd = cmds.pointConstraint
     else:
         raise Exception("type invalid")
+
+    cons = constraint_cmd(_path(locator1), _path(locator2), grp_blend)[0]
+    weight_w0, weight_w1 = constraint_cmd(cons, q=True, weightAliasList=True)
 
     cmds.setAttr("{}.interpType".format(cons), 2)
 
     cmds.addAttr(controller, ln=attr_name, k=1, min=0, max=1)
     cmds.connectAttr(
-        "{}.{}".format(controller, attr_name), "{}.{}W0".format(cons, locator1)
+        "{}.{}".format(controller, attr_name), "{}.{}".format(cons, weight_w0)
     )
     cmds.connectAttr(
         "{}.{}".format(controller, attr_name), "{}.inputX".format(node_rev)
     )
-    cmds.connectAttr("{}.outputX".format(node_rev), "{}.{}W1".format(cons, locator2))
+    cmds.connectAttr("{}.outputX".format(node_rev), "{}.{}".format(cons, weight_w1))
 
 
 def connect(
@@ -480,14 +491,18 @@ def connect_switch_joint(
         joint_fk = str(joint_fk)
         joint_ik = str(joint_ik)
 
-        if method == "parent":
-            constraint = cmds.parentConstraint(joint_fk, joint_ik, joint_bind)
-            cmds.connectAttr(node_rev + ".outputX", "{}.w0".format(constraint))
-            cmds.connectAttr(node_rev + ".inputX", "{}.w1".format(constraint))
-        elif method == "orient":
-            constraint = cmds.orientConstraint(joint_fk, joint_ik, joint_bind)
-            cmds.connectAttr(node_rev + ".outputX", "{}.w0".format(constraint))
-            cmds.connectAttr(node_rev + ".inputX", "{}.w1".format(constraint))
+        if method in ("parent", "orient"):
+            func_constraint = (
+                cmds.parentConstraint if method == "parent" else cmds.orientConstraint
+            )
+            constraint = func_constraint(joint_fk, joint_ik, joint_bind)[0]
+            list_weight = func_constraint(constraint, q=1, wal=1)
+            cmds.connectAttr(
+                node_rev + ".outputX", "{}.{}".format(constraint, list_weight[0])
+            )
+            cmds.connectAttr(
+                node_rev + ".inputX", "{}.{}".format(constraint, list_weight[1])
+            )
         elif method == "blendColors":
             node_blend_color = cmds.createNode("blendColors", n="rotate_blend")
             cmds.connectAttr(joint_ik + ".rotate", node_blend_color + ".color2")

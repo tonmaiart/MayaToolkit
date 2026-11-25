@@ -24,30 +24,51 @@ def clone_style(list_target=None):
 
     Input list = [target1,target2,...,ref]
 
+    Shapes are matched by index (target shape N gets ref shape N, extra
+    target shapes get the ref's last one). Every override color attr is
+    copied -- index AND RGB -- because AdvancedSkeleton's rebuild ("keep
+    curve shapes") only restores ".overrideColor"; this way a rebuilt
+    control still falls back to the ref's index color.
     """
 
     if list_target is None:
         list_target = cmds.ls(sl=1, typ="transform", l=1)
 
+    if len(list_target) < 2:
+        cmds.warning("Select target control(s), then the reference control last.")
+        return
+
     selection = list_target
 
     # sort shape, reference is last one
     ref = list_target[-1]
-    list_ref_shape = cmds.listRelatives(ref, c=1, s=1, typ="nurbsCurve", f=1)
+    list_ref_shape = _curve_shapes(ref)
+    if not list_ref_shape:
+        cmds.warning("Reference '{}' has no curve shape.".format(ref))
+        return
 
     list_target = list_target[0 : len(list_target) - 1]
 
-    # get ref line width and color
-    line_width = cmds.getAttr(list_ref_shape[0] + ".lineWidth")
-    color_data = get_curve_color_data(list_ref_shape[0])
+    style_attrs = [
+        "lineWidth",
+        "overrideEnabled",
+        "overrideRGBColors",
+        "overrideColor",
+        "overrideColorR",
+        "overrideColorG",
+        "overrideColorB",
+    ]
 
     # apply
     for target in list_target:
-        # set color
-        set_color(list_input_transform=[target], color_data=color_data)
-
-        # set line width
-        set_line_width(list_input_transform=[target], width=line_width)
+        for i, shape in enumerate(_curve_shapes(target)):
+            ref_shape = list_ref_shape[min(i, len(list_ref_shape) - 1)]
+            for attr in style_attrs:
+                plug = "{}.{}".format(shape, attr)
+                # AS drives some override attrs (e.g. face ctrl visibility) -- leave those
+                if cmds.getAttr(plug, lock=True) or cmds.listConnections(plug, s=1, d=0):
+                    continue
+                cmds.setAttr(plug, cmds.getAttr("{}.{}".format(ref_shape, attr)))
 
     cmds.select(selection, r=1)
 
@@ -62,6 +83,120 @@ def get_official_curve_data(index):
     )
 
     return dict_curve_data["ctrl_{}".format(str(index).zfill(2))]
+
+
+# ------------------------------------------------------------------
+# AdvancedSkeleton controller gallery
+# ------------------------------------------------------------------
+
+# path -> (mtime, gallery dict); the .ma is parsed once per change
+_AS_GALLERY_CACHE = {}
+
+
+def get_advanced_skeleton_gallery_path():
+    """asGallery.ma of the AdvancedSkeleton install, or None if not found.
+
+    Looks at $ADVANCEDSKELETON_ROOT (set by the ukore_advanced_skeleton
+    plugin) first, then at an already-sourced AdvancedSkeleton.mel.
+    """
+    candidates = []
+    root = os.environ.get("ADVANCEDSKELETON_ROOT")
+    if root:
+        candidates.append(root)
+    try:
+        if mel.eval('exists "asGetScriptLocation"'):
+            candidates.append(mel.eval("asGetScriptLocation"))
+    except RuntimeError:
+        pass
+
+    for root in candidates:
+        path = os.path.join(root, "AdvancedSkeletonFiles", "div", "asGallery.ma")
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _parse_nurbs_curve_data(tokens):
+    """Tokens of a `setAttr ".cc" -type "nurbsCurve" ...` value -> curve dict."""
+    degree, spans, form = int(tokens[0]), int(tokens[1]), int(tokens[2])
+    rational = tokens[3] == "yes"
+    dimension = int(tokens[4])
+    knot_count = int(tokens[5])
+    knots = [float(value) for value in tokens[6 : 6 + knot_count]]
+
+    index = 6 + knot_count
+    cv_count = int(tokens[index])
+    stride = dimension + (1 if rational else 0)
+    cvs = []
+    for i in range(cv_count):
+        start = index + 1 + i * stride
+        point = [float(value) for value in tokens[start : start + dimension]]
+        cvs.append(tuple((point + [0.0, 0.0, 0.0])[:3]))
+
+    return {"degree": degree, "spans": spans, "form": form, "knots": knots, "cvs": cvs}
+
+
+def get_advanced_skeleton_gallery():
+    """{shape_name: [curve dict, ...]} from AdvancedSkeleton's controller gallery.
+
+    Read straight from asGallery.ma (no scene import), in the file's order --
+    the same shapes AS's "import controller gallery" brings in. A shape can
+    hold several curves (e.g. "Gear").
+    """
+    path = get_advanced_skeleton_gallery_path()
+    if not path:
+        raise RuntimeError(
+            "AdvancedSkeleton asGallery.ma not found -- set ADVANCEDSKELETON_ROOT "
+            "or source AdvancedSkeleton.mel first."
+        )
+
+    mtime = os.path.getmtime(path)
+    cached = _AS_GALLERY_CACHE.get(path)
+    if cached and cached[0] == mtime:
+        return cached[1]
+
+    with open(path, "r") as file:
+        statements = file.read().split(";")
+
+    gallery = {}
+    curve_parent = None
+    for statement in statements:
+        words = statement.split()
+        if len(words) < 4:
+            continue
+
+        if words[0] == "createNode" and "-n" in words:
+            name = words[words.index("-n") + 1].strip('"')
+            parent = words[words.index("-p") + 1].strip('"') if "-p" in words else None
+            if words[1] == "transform" and parent == "ControllerGallery":
+                gallery[name] = []
+            curve_parent = parent if words[1] == "nurbsCurve" else None
+
+        elif words[:4] == ["setAttr", '".cc"', "-type", '"nurbsCurve"'] and curve_parent in gallery:
+            gallery[curve_parent].append(_parse_nurbs_curve_data(words[4:]))
+
+    gallery = {name: curves for name, curves in gallery.items() if curves}
+    _AS_GALLERY_CACHE[path] = (mtime, gallery)
+    return gallery
+
+
+def create_advanced_skeleton_shape(shape_name, name="control"):
+    """Transform holding the given AS gallery shape's curve(s), named like AS ("<name>Shape")."""
+    transform = cmds.createNode("transform", name=name)
+
+    for data in get_advanced_skeleton_gallery()[shape_name]:
+        tmp_curve = cmds.curve(
+            degree=data["degree"],
+            point=data["cvs"],
+            knot=data["knots"],
+            periodic=data["form"] == 2,
+        )
+        for shape in cmds.listRelatives(tmp_curve, shapes=True, fullPath=True) or []:
+            cmds.parent(shape, transform, shape=True, relative=True)
+        cmds.delete(tmp_curve)
+
+    set_proper_shape_name(transform)
+    return transform
 
 
 def create_curve_from_data(dict_curve_data, name="control"):
@@ -97,7 +232,7 @@ def create_curve_from_data(dict_curve_data, name="control"):
         if len(list_pos) < 2:
             continue
 
-        if list_form[i] == 0:  # simple curve
+        if list_form[i] in (0, 1):  # open / closed curve
             crv = cmds.curve(
                 p=list_pos, d=list_degree[i]
             )  # degree 1 (linear), change to d=3 for cubic
@@ -222,32 +357,33 @@ def set_color(color_data, list_input_transform=None):
 
 
 def create_control(index):
-    selection = cmds.ls(sl=1, typ="transform", l=1)
-
-    if cmds.ls(sl=1):
-        replace = True
-    else:
-        replace = False
-
     dict_curve_data = get_official_curve_data(index=index)
-    item_name = create_curve_from_data(dict_curve_data=dict_curve_data)
+    return _create_or_replace_control(lambda: create_curve_from_data(dict_curve_data=dict_curve_data))
+
+
+def create_advanced_skeleton_control(shape_name):
+    """Create mode: new control of an AS gallery shape. Replace mode
+    (something selected): swap the selected controls' shapes for it, keeping
+    each control's own color/width and AdvancedSkeleton set membership."""
+    return _create_or_replace_control(lambda: create_advanced_skeleton_shape(shape_name))
+
+
+def _create_or_replace_control(create_item):
+    """create_item : function that create temp shape transform and return its name"""
+    # get selection before create temp item (creating curve change selection)
+    selection = cmds.ls(sl=1, typ="transform", l=1)
+    replace = bool(cmds.ls(sl=1))
+
+    if replace and not selection:
+        raise Exception("Please Select Targets before replace shape")
+
+    item_name = create_item()
 
     if replace:  # replace mode
-        if not selection:
-            raise Exception("Please Select Targets before replace shape")
 
-        list_ref_shape = cmds.listRelatives(selection[0], c=1, typ="nurbsCurve")
-
-        line_width = cmds.getAttr(list_ref_shape[0] + ".lineWidth")
-        color_index = get_curve_color_data(list_ref_shape[0])
-
+        # each target keeps its own color / line width (clone_shape default)
         for sel in selection:
-            clone_shape(
-                [sel, item_name],
-                line_width=line_width,
-                color_data=color_index,
-                match_bounding_box=True,
-            )
+            clone_shape([sel, item_name], match_bounding_box=True)
 
         cmds.select(selection, r=1)
 
@@ -354,33 +490,38 @@ def isolate_clear():
 
 
 def flip_shape(axis: str):
-    """Flip shape scale by given axis"""
+    """Mirror the selected controls' curve CVs across a local axis.
+
+    Pure math on each CV's object-space (local) position -- the chosen
+    component is negated, nothing else is touched: no temp duplicate, no
+    freeze, no shape swap, so shape names, sets, colors and connections
+    (everything AdvancedSkeleton relies on) stay as they are.
+
+    axis: "x", "y" or "z". Works on selected transforms or curve shapes.
+    """
+    component = "xyz".index(axis.lower())
+
+    shapes = []
+    for sel in cmds.ls(sl=1, l=1, o=1) or []:
+        if cmds.objectType(sel, isa="nurbsCurve"):
+            candidates = [sel]
+        else:
+            candidates = _curve_shapes(sel)
+        for shape in candidates:
+            if shape not in shapes:
+                shapes.append(shape)
+
     cmds.undoInfo(ock=1)
-    selection = cmds.ls(sl=1, typ="transform", l=1)
-
-    for sel in selection:
-        # create tmp transform and clone shape
-        tmp_transform = cmds.duplicate(sel)[0]
-        clone_shape([tmp_transform, sel])
-
-        if cmds.listRelatives(tmp_transform, c=1, typ="transform"):
-            cmds.delete(cmds.listRelatives(tmp_transform, c=1, typ="transform"))
-
-        list_lock = []
-        for attr in ["sx", "sy", "sz"]:
-            if cmds.getAttr("{}.{}".format(tmp_transform, attr), l=1):
-                list_lock.append("sx")
-                cmds.setAttr("{}.{}".format(tmp_transform, attr), l=0, k=1)
-
-        cmds.setAttr("{}.s{}".format(tmp_transform, axis), -1)
-        cmds.makeIdentity(tmp_transform, a=1, s=1)
-
-        cmds.select(sel, tmp_transform)
-        clone_shape()
-        cmds.delete(tmp_transform)
-
-    cmds.select(selection)
-    cmds.undoInfo(cck=1)
+    try:
+        for shape in shapes:
+            cvs = cmds.ls(shape + ".cv[*]", fl=1)
+            positions = cmds.xform(cvs, q=1, os=1, t=1)
+            for i, cv in enumerate(cvs):
+                position = positions[i * 3 : i * 3 + 3]
+                position[component] = -position[component]
+                cmds.xform(cv, os=1, t=position)
+    finally:
+        cmds.undoInfo(cck=1)
 
 
 def set_line_width(width, list_input_transform=None):
@@ -414,6 +555,38 @@ def set_line_width(width, list_input_transform=None):
     if list_shape:
         for shape in list_shape:
             cmds.setAttr(shape + ".lineWidth", width)
+
+
+def set_always_draw_on_top(state, list_input_transform=None):
+    """
+    Set alwaysDrawOnTop of controller curve shapes (transform or shape input, use selection if None)
+    """
+
+    if list_input_transform is None:
+        list_input_transform = cmds.ls(sl=1)
+
+    list_shape = []
+
+    for sel in list_input_transform:
+        if cmds.objectType(sel, isa="nurbsCurve"):
+            list_shape.append(sel)
+        else:
+            list_shape += _curve_shapes(sel)
+
+    if not list_shape:
+        cmds.warning("Select controller(s) to set always draw on top")
+        return
+
+    for shape in list_shape:
+        plug = shape + ".alwaysDrawOnTop"
+        # leave locked / driven attr
+        if cmds.getAttr(plug, lock=True) or cmds.listConnections(plug, s=1, d=0):
+            continue
+        cmds.setAttr(plug, bool(state))
+
+    cmds.inViewMessage(
+        amg="Draw On Top : {}".format("On" if state else "Off"), pos="botCenter", fade=True
+    )
 
 
 def get_curve_color_data(shape):
@@ -451,6 +624,32 @@ def match_controller_cv():
         Transform.match_cvs(source, ref)
 
 
+def _curve_shapes(node):
+    """Non-intermediate nurbsCurve shapes of node (full paths), in hierarchy order."""
+    return [
+        shape
+        for shape in cmds.listRelatives(node, c=1, s=1, typ="nurbsCurve", f=1) or []
+        if not cmds.getAttr(shape + ".intermediateObject")
+    ]
+
+
+def _incoming_shape_connections(shape):
+    """[(source_plug, attr)] driving shape, minus history (".create") and set membership.
+
+    AdvancedSkeleton drives control-shape visibility through these (".v",
+    and ".drawOverride.overrideVisibility" on face controls -- the latter is
+    what AS's own asSwapCurve loses, see its TODO).
+    """
+    connections = []
+    pairs = cmds.listConnections(shape, s=1, d=0, p=1, c=1) or []
+    for dst_plug, src_plug in zip(pairs[::2], pairs[1::2]):
+        attr = dst_plug.split(".", 1)[1]
+        if attr == "create" or cmds.objectType(_node_only(src_plug), isa="objectSet"):
+            continue
+        connections.append((src_plug, attr))
+    return connections
+
+
 def clone_shape(
     list_input_transform=None,
     line_width=None,
@@ -463,114 +662,102 @@ def clone_shape(
     if line width or color index not have input will use it's ctrl_target color (not clone style)
 
     color_data = [bool,color_value] , [is_index,color_value]
+
+    AdvancedSkeleton compatible: new shapes are named "<ctrl>Shape" (+N),
+    join every set the old shapes were in (AllSet / FaceAllSet / ...), and
+    get the old shape's incoming connections (visibility drivers) back.
     """
 
     if list_input_transform is None:
         list_input_transform = cmds.ls(sl=1, typ="transform", l=1)
 
+    if len(list_input_transform) < 2:
+        cmds.warning("Select target control(s), then the reference control last.")
+        return
+
     # sort shape
     ctrl_ref = list_input_transform[-1]
     list_ctrl_target = list_input_transform[0 : len(list_input_transform) - 1]
 
-    # preserve sets for advance skeleton controller
-    if "AllSet" in cmds.ls(typ="objectSet"):
-        advanced_set_exist = True
-    else:
-        advanced_set_exist = False
-
     # check is ref control have shape
-    if not cmds.listRelatives(ctrl_ref, c=1, s=1, typ="nurbsCurve"):
+    if not _curve_shapes(ctrl_ref):
+        cmds.warning("Reference '{}' has no curve shape.".format(ctrl_ref))
         return
 
     # apply for each ctrl_target
     for ctrl_target in list_ctrl_target:
-        # collect style of target if no given style input (line width and curve data) ------------------
-        target_shape = cmds.listRelatives(ctrl_target, c=1, s=1, typ="nurbsCurve")
+        old_shapes = _curve_shapes(ctrl_target)
 
-        # is advanced shape
-        is_advanced_shape = False
+        # style: given value, else this target's own first shape
+        target_width = line_width
+        target_color = color_data
+        if old_shapes:
+            if target_width is None:
+                target_width = cmds.getAttr(old_shapes[0] + ".lineWidth")
+            if target_color is None:
+                target_color = get_curve_color_data(old_shapes[0])
+        else:
+            if target_width is None:
+                target_width = 1
+            if target_color is None:
+                target_color = [None, None]
 
-        if advanced_set_exist:
-            for shape in target_shape:
-                if cmds.sets("AllSet", im=shape):
-                    is_advanced_shape = True
-                    break
+        # keep target's own draw on top (None = no old shape, keep ref value)
+        target_draw_on_top = cmds.getAttr(old_shapes[0] + ".alwaysDrawOnTop") if old_shapes else None
 
-        # store connection list
-        list_connection = cmds.listConnections(target_shape, p=1, c=1)
-        list_connection = [
-            [str(item) for item in sublist] for sublist in list_connection
-        ]
+        # what AS needs preserved
+        connections = _incoming_shape_connections(old_shapes[0]) if old_shapes else []
+        member_sets = []
+        for shape in old_shapes:
+            for object_set in cmds.listSets(object=shape) or []:
+                if object_set not in member_sets:
+                    member_sets.append(object_set)
 
-        if match_bounding_box:
-            target_bb_size = Transform.get_bounding_box_max(target_shape)
+        target_bb_size = None
+        if match_bounding_box and old_shapes:
+            target_bb_size = Transform.get_bounding_box_max(old_shapes)
 
-        if target_shape:
-            target_shape = target_shape[0]
-            if not line_width:
-                line_width = cmds.getAttr("{}.lineWidth".format(target_shape))
-            if not color_data:
-                color_data = get_curve_color_data(target_shape)
-
-        elif not target_shape:
-            if not line_width:
-                line_width = 1
-            if not color_data:
-                color_data = [None, None]
-
-        # clear all shape in ctrl_target node -----------------
-        for list_delete in cmds.listRelatives(
-            ctrl_target, c=1, s=1, typ="nurbsCurve", f=1
-        ):
-            if list_delete:
-                cmds.delete(list_delete)
+        # clear old shapes
+        if old_shapes:
+            cmds.delete(old_shapes)
 
         # duplicate shape and transfer shape to target
-        dup_transform = cmds.duplicate(ctrl_ref)[0]
-        dup_shapes = cmds.listRelatives(dup_transform, c=1, s=1, f=1, typ="nurbsCurve")
+        dup_transform = cmds.duplicate(ctrl_ref, rc=1)[0]
+        dup_shapes = _curve_shapes(dup_transform)
 
-        if match_bounding_box:
+        if target_bb_size:
             dup_bb_size = Transform.get_bounding_box_max(dup_shapes)
+            if dup_bb_size:
+                scale_size = target_bb_size / dup_bb_size
+                cmds.xform(
+                    dup_transform, scale=(scale_size, scale_size, scale_size), ws=1, r=1
+                )
+                cmds.makeIdentity(dup_transform, a=1, s=1)
 
-            scale_size = target_bb_size / dup_bb_size
-
-            cmds.xform(
-                dup_transform, scale=(scale_size, scale_size, scale_size), ws=1, r=1
-            )
-            cmds.makeIdentity(dup_transform, a=1, s=1)
-
-        if dup_shapes:
-            for shape in dup_shapes:
-                # parent to transform node
-                cmds.parent(shape, ctrl_target, r=1, s=1)
-
-        # set color
-        set_color(color_data=color_data, list_input_transform=[ctrl_target])
-
-        # set line width
-        set_line_width(list_input_transform=[ctrl_target], width=line_width)
+        for shape in dup_shapes:
+            cmds.parent(shape, ctrl_target, r=1, s=1)
 
         cmds.delete(dup_transform)
 
-        # rename shape to proper name
+        # rename shape to proper name ("<ctrl>Shape" like AdvancedSkeleton)
         set_proper_shape_name(ctrl_target)
+        new_shapes = _curve_shapes(ctrl_target)
 
-        # reconnection
-        if list_connection:
-            for connection in list_connection:
-                target, source = connection
+        set_color(color_data=target_color, list_input_transform=new_shapes)
+        set_line_width(list_input_transform=new_shapes, width=target_width)
 
-                if cmds.objectType(_node_only(source)) != "objectSet":
-                    try:
-                        cmds.connectAttr(str(source), str(target))
-                    except:
-                        pass
-        # Append to sets
-        if is_advanced_shape:
-            shape_new = cmds.listRelatives(ctrl_target, c=1, s=1, typ="nurbsCurve")
+        if target_draw_on_top is not None:
+            for shape in new_shapes:
+                cmds.setAttr(shape + ".alwaysDrawOnTop", target_draw_on_top)
 
-            for shape in shape_new:
-                cmds.sets("AllSet", add=shape)
+        for shape in new_shapes:
+            for src_plug, attr in connections:
+                try:
+                    cmds.connectAttr(src_plug, "{}.{}".format(shape, attr), f=1)
+                except RuntimeError as error:
+                    cmds.warning("Reconnect failed {} -> {}.{}: {}".format(src_plug, shape, attr, error))
+            for object_set in member_sets:
+                cmds.sets(shape, add=object_set)
 
     cmds.select(list_input_transform, r=1)
 
@@ -872,162 +1059,170 @@ def set_proper_shape_name(control):
         cmds.rename(shape, "{}Shape".format(_short_name(str(control))))
 
 
+def _swap_side(name, left_to_right):
+    """FKArm_L -> FKArm_R (first occurrence only, like MEL `substitute`)."""
+    source, target = ("_L", "_R") if left_to_right else ("_R", "_L")
+    return name.replace(source, target, 1)
+
+
+def _mirror_shapes(node):
+    """Non-intermediate nurbsCurve / nurbsSurface shapes of node, in hierarchy order."""
+    return [
+        shape
+        for shape in cmds.listRelatives(node, s=1, f=1) or []
+        if cmds.objectType(shape) in ("nurbsCurve", "nurbsSurface")
+        and not cmds.getAttr(shape + ".intermediateObject")
+    ]
+
+
+def _mirror_topology(shapes):
+    """Per shape: (type, spans, degree, form) -- equal lists mean CVs pair up 1:1."""
+    topology = []
+    for shape in shapes:
+        if cmds.objectType(shape) == "nurbsCurve":
+            topology.append(
+                (
+                    "nurbsCurve",
+                    cmds.getAttr(shape + ".spans"),
+                    cmds.getAttr(shape + ".degree"),
+                    cmds.getAttr(shape + ".form"),
+                )
+            )
+        else:
+            topology.append((cmds.objectType(shape), None, None, None))
+    return topology
+
+
+def _mirror_cvs(source_cvs, target_cvs):
+    """target CV i = source CV i mirrored across world X (AS: xform -ws -t -x y z)."""
+    positions = cmds.xform(source_cvs, q=1, ws=1, t=1)
+    for i, cv in enumerate(target_cvs[: len(source_cvs)]):
+        x, y, z = positions[i * 3 : i * 3 + 3]
+        cmds.xform(cv, ws=1, t=(-x, y, z))
+
+
+def _mirror_skin_cage_curve(ctrl, opposite_ctrl, shape, opposite_shape, left_to_right):
+    """SkinCageCurvesSet: AS's own CV remap + slide joints, ported 1:1."""
+    pos = cmds.xform(ctrl, q=True, ws=True, t=True)
+    sca = cmds.getAttr(ctrl + ".s")[0]
+    cmds.xform(opposite_ctrl, ws=True, t=[-pos[0], pos[1], pos[2]])
+    cmds.setAttr(opposite_ctrl + ".s", sca[0], sca[1], sca[2], type="float3")
+
+    remap = {0: 2, 1: 3, 2: 0, 3: 1, 4: 2}
+    for y in range(len(cmds.ls(shape + ".cv[*]", fl=1))):
+        pos = cmds.xform(f"{shape}.cv[{y}]", q=True, ws=True, t=True)
+        z = remap.get(y, y)
+        cmds.xform(f"{opposite_shape}.cv[{z}]", ws=True, t=[-pos[0], pos[1], pos[2]])
+        if y == 2:
+            cmds.xform(f"{opposite_shape}.cv[4]", ws=True, t=[-pos[0], pos[1], pos[2]])
+
+    skin_info = mel.eval(f'asSkinCurveSliderInfo "{ctrl}"')
+    have_slider = [cmds.objExists(f"{skin_info[0]}_{skin_info[1]}Slider{y}") for y in range(4)]
+
+    if any(have_slider):
+        cmds.select(opposite_ctrl, r=True)
+        mel.eval("asCreateSliders")
+
+        slider_remap = {0: 2, 1: 3, 2: 0, 3: 1}
+        for y in range(4):
+            slider = f"{skin_info[0]}_{skin_info[1]}Slider{y}"
+            opposite_slider = _swap_side(slider, left_to_right)
+            opposite_slider = opposite_slider.replace(str(y), str(slider_remap[y]), 1)
+            if cmds.objExists(slider) and cmds.objExists(opposite_slider):
+                cmds.setAttr(opposite_slider + ".slide", cmds.getAttr(slider + ".slide"))
+    else:
+        opposite_info = mel.eval(f'asSkinCurveSliderInfo "{opposite_ctrl}"')
+        if any(cmds.objExists(f"{opposite_info[0]}_{opposite_info[1]}Slider{i}") for i in range(4)):
+            cmds.select(opposite_ctrl, r=True)
+            mel.eval("asDeleteSliders")
+
+
+def _as_mirror_control_set(left_to_right, set_name):
+    if not cmds.objExists(set_name):
+        return 0
+
+    side = "_L" if left_to_right else "_R"
+    mirrored = 0
+
+    for ctrl in cmds.sets(set_name, q=True) or []:
+        short = _short_name(ctrl)
+        if side not in short:
+            continue
+
+        # AS: never mirror the face joystick ctrls (ctrlBox side panels)
+        if set_name == "FaceControlSet" and short.split(":")[-1].startswith("ctrl"):
+            continue
+
+        opposite_ctrl = _swap_side(ctrl, left_to_right)
+        if not cmds.objExists(opposite_ctrl):
+            continue
+
+        shapes = _mirror_shapes(ctrl)
+        opposite_shapes = _mirror_shapes(opposite_ctrl)
+        if not shapes or not opposite_shapes:
+            continue
+
+        if set_name == "SkinCageCurvesSet":
+            _mirror_skin_cage_curve(ctrl, opposite_ctrl, shapes[0], opposite_shapes[0], left_to_right)
+            mirrored += 1
+            continue
+
+        # One side swapped to another / multi-shape curve: copy the shapes over
+        # first -- clone_shape keeps the opposite's color, sets and AS connections.
+        source_topology = _mirror_topology(shapes)
+        if source_topology != _mirror_topology(opposite_shapes):
+            if all(t[0] == "nurbsCurve" for t in source_topology):
+                clone_shape([opposite_ctrl, ctrl])
+                opposite_shapes = _mirror_shapes(opposite_ctrl)
+            else:
+                cmds.warning("Mirror skipped, shapes differ: {} -> {}".format(ctrl, opposite_ctrl))
+                continue
+
+        for shape, opposite_shape in zip(shapes, opposite_shapes):
+            if cmds.objectType(shape) == "nurbsSurface":
+                _mirror_cvs(cmds.ls(shape + ".cv[*][*]", fl=1), cmds.ls(opposite_shape + ".cv[*][*]", fl=1))
+                # AS: softMod / cluster surfaces get their direction reversed
+                if cmds.attributeQuery("softModControl", node=ctrl, exists=True) or cmds.attributeQuery(
+                    "clusterControl", node=ctrl, exists=True
+                ):
+                    cmds.reverseSurface(opposite_shape, d=0, ch=0, rpo=True)
+            else:
+                _mirror_cvs(cmds.ls(shape + ".cv[*]", fl=1), cmds.ls(opposite_shape + ".cv[*]", fl=1))
+        mirrored += 1
+
+    return mirrored
+
+
 def as_mirror_control_curves(left_to_right, setName="ControlSet"):
+    """Mirror control curves L->R (or R->L) for a whole AdvancedSkeleton set.
+
+    Same rules as AS's asMirrorControlCurves (its Left>Right / Right>Left
+    buttons): build pose required, world-X mirror of every CV, face joystick
+    "ctrl*" skipped, SkinCageCurvesSet remap + slide joints, and -- like AS --
+    mirroring "ControlSet" also mirrors "FaceControlSet" (facial controls).
+    Beyond AS: every shape of a multi-shape control is mirrored (AS only does
+    the first), and a side whose shapes differ gets them copied first.
+    """
     # confirm build pose
-    if not mel.eval("asConfirmIfNotInBuildPose"):
+    if mel.eval('exists "asConfirmIfNotInBuildPose"') and not mel.eval("asConfirmIfNotInBuildPose"):
         return
 
     sel = cmds.ls(sl=True) or []
-    controlObjects = cmds.sets(setName, q=True) or []
-
-    for ctrl in controlObjects:
-        shapes = cmds.listRelatives(ctrl, s=True) or []
-        if not shapes:
-            continue
-
-        shape = shapes[0]
-        objType = cmds.objectType(shape)
-
-        if objType not in ["nurbsCurve", "nurbsSurface"]:
-            continue
-
-        # left / right filter
-        if left_to_right:
-            if "_L" not in shape:
-                continue
+    try:
+        mirrored = _as_mirror_control_set(left_to_right, setName)
+        if setName == "ControlSet":
+            mirrored += _as_mirror_control_set(left_to_right, "FaceControlSet")
+    finally:
+        if sel:
+            cmds.select(sel, r=True)
         else:
-            if "_R" not in shape:
-                continue
+            cmds.select(cl=True)
 
-        # skip joystick face ctrls
-        if setName == "FaceControlSet" and shape.startswith("ctrl"):
-            continue
-
-        # opposite naming
-        if left_to_right:
-            oppositeShape = shape.replace("_L", "_R")
-            oppositeCtrl = ctrl.replace("_L", "_R")
-        else:
-            oppositeShape = shape.replace("_R", "_L")
-            oppositeCtrl = ctrl.replace("_R", "_L")
-
-        if not cmds.objExists(oppositeShape):
-            continue
-
-        # ==============================
-        # NURBS SURFACE
-        # ==============================
-        if objType == "nurbsSurface":
-            cvs = cmds.ls(shape + ".cv[0:999][0:999]", fl=True) or []
-
-            for cv in cvs:
-                parts = cv.split(".")
-                if cmds.objectType(parts[0]) == "transform":
-                    cv = shape + "." + parts[1]
-
-                pos = cmds.xform(cv, q=True, ws=True, t=True)
-                cmds.xform(
-                    cv.replace(shape, oppositeShape),
-                    ws=True,
-                    t=[-pos[0], pos[1], pos[2]],
-                )
-
-            if cmds.attributeQuery(
-                "softModControl", node=ctrl, exists=True
-            ) or cmds.attributeQuery("clusterControl", node=ctrl, exists=True):
-                cmds.reverseSurface(oppositeShape, d=0, ch=0, rpo=True)
-
-            continue
-
-        # ==============================
-        # SKIN CAGE CURVES SET
-        # ==============================
-        if setName == "SkinCageCurvesSet":
-            pos = cmds.xform(ctrl, q=True, ws=True, t=True)
-            sca = cmds.getAttr(ctrl + ".s")[0]
-
-            cmds.xform(oppositeCtrl, ws=True, t=[-pos[0], pos[1], pos[2]])
-            cmds.setAttr(oppositeCtrl + ".s", sca[0], sca[1], sca[2], type="float3")
-
-        # ==============================
-        # CURVE CV MIRRORING
-        # ==============================
-        form = cmds.getAttr(shape + ".form")
-        spans = cmds.getAttr(shape + ".spans")
-        degree = cmds.getAttr(shape + ".degree")
-
-        if form == 2:
-            numCv = spans
-        else:
-            numCv = spans + degree
-
-        for y in range(numCv + 1):
-            pos = cmds.xform(f"{shape}.cv[{y}]", q=True, ws=True, t=True)
-
-            # remap index for skin cage
-            z = y
-            if y == 0:
-                z = 2
-            if y == 1:
-                z = 3
-            if y == 2:
-                z = 0
-            if y == 3:
-                z = 1
-            if y == 4:
-                z = 2
-
-            if setName == "SkinCageCurvesSet":
-                cmds.xform(
-                    f"{oppositeShape}.cv[{z}]", ws=True, t=[-pos[0], pos[1], pos[2]]
-                )
-                if y == 2:
-                    cmds.xform(
-                        f"{oppositeShape}.cv[4]", ws=True, t=[-pos[0], pos[1], pos[2]]
-                    )
-            else:
-                cmds.xform(
-                    f"{oppositeShape}.cv[{y}]", ws=True, t=[-pos[0], pos[1], pos[2]]
-                )
-
-        # ==============================
-        # MIRROR SLIDE JOINTS
-        # ==============================
-        if setName == "SkinCageCurvesSet":
-            skinInfo = mel.eval(f'asSkinCurveSliderInfo "{ctrl}"')
-            haveSlider = [0, 0, 0, 0]
-
-            for y in range(4):
-                joint = f"{skinInfo[0]}_{skinInfo[1]}Slider{y}"
-                haveSlider[y] = cmds.objExists(joint)
-
-            if any(haveSlider):
-                cmds.select(oppositeCtrl, r=True)
-                mel.eval("asCreateSliders")
-
-                for y in range(4):
-                    slider = f"{skinInfo[0]}_{skinInfo[1]}Slider{y}"
-
-                    if left_to_right:
-                        oppSlider = slider.replace("_L", "_R")
-                    else:
-                        oppSlider = slider.replace("_R", "_L")
-
-                    remap = {0: 2, 1: 3, 2: 0, 3: 1}
-                    oppSlider = oppSlider.replace(str(y), str(remap[y]))
-
-                    if cmds.objExists(slider) and cmds.objExists(oppSlider):
-                        val = cmds.getAttr(slider + ".slide")
-                        cmds.setAttr(oppSlider + ".slide", val)
-            else:
-                oppInfo = mel.eval(f'asSkinCurveSliderInfo "{oppositeCtrl}"')
-                oppHave = [
-                    cmds.objExists(f"{oppInfo[0]}_{oppInfo[1]}Slider{i}")
-                    for i in range(4)
-                ]
-                if any(oppHave):
-                    cmds.select(oppositeCtrl, r=True)
-                    mel.eval("asDeleteSliders")
+    cmds.inViewMessage(
+        amg="Mirror {}: {} controls".format("L > R" if left_to_right else "R > L", mirrored),
+        pos="botCenter",
+        fade=True,
+    )
 
 
 def as_swap_curve():

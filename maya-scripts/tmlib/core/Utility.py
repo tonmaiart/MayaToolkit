@@ -361,7 +361,8 @@ def match_parent(target, parent):
     """Match transform and parent"""
 
     Transform.match_transform(target, parent)
-    cmds.parent(target, parent)
+    # parent may rename/re-path the node (e.g. name clash under new parent)
+    target = cmds.parent(target, parent)[0]
 
     return target
 
@@ -382,9 +383,7 @@ def set_rotate_order(list_target, rotate_order):
 
 
 def show_rotate_order(object):
-    object_node = make_pynode(object)
-
-    cmds.setAttr("{}.rotateOrder".format(object_node), l=0, k=1)
+    cmds.setAttr("{}.rotateOrder".format(object), l=0, k=1)
 
 
 def get_vertex_data_position(mesh):

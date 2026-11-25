@@ -130,17 +130,14 @@ def get_quick_selection_sets():
     # Find all shading groups by finding sets connected to shading engines
     shading_engines = cmds.ls(type="shadingEngine")
     for engine in shading_engines:
-        # The .connections() method is a clean way to find connected nodes
-        connected_sets = engine.connections(type="objectSet")
+        connected_sets = cmds.listConnections(engine, type="objectSet") or []
         sets_to_exclude.update(connected_sets)
 
+    # shading engines are objectSet too
+    sets_to_exclude.update(shading_engines)
+
     # Add default Maya sets that are not user-created selection sets
-    try:
-        sets_to_exclude.add(cmds.PyNode("defaultObjectSet"))
-        sets_to_exclude.add(cmds.PyNode("defaultLightSet"))
-    except cmds.MayaNodeError:
-        # These nodes might not exist in a completely empty scene
-        pass
+    sets_to_exclude.update(["defaultObjectSet", "defaultLightSet"])
 
     # Calculate the difference to get only the quick selection sets
     quick_selection_sets = list(all_sets - sets_to_exclude)
@@ -279,17 +276,14 @@ def get_all_vertices(mesh_name):
         mesh_name (str): The name of the mesh.
 
     Returns:
-        list: A list of PyNode objects representing the vertices of the mesh.
+        list: Flattened vertex names of the mesh (e.g. "mesh.vtx[0]").
             Returns an empty list if the mesh does not exist.
     """
     if not cmds.objExists(mesh_name):
         cmds.warning(f"Mesh '{mesh_name}' does not exist.")
         return []
 
-    mesh_node = cmds.PyNode(mesh_name)
-    # Using the .vtx attribute of a PyNode for meshes returns all vertices
-
-    return mesh_node.vtx[:]
+    return cmds.ls("{}.vtx[*]".format(mesh_name), fl=True)
 
 
 def flip_keyword(input, ignore=False, L="L_", R="R_"):

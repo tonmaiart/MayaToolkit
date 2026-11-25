@@ -1,6 +1,7 @@
 from tmlib.core import Scene, Utility, File, SkinWeight, Controller, Transform,Selection
-import os, json
+import os, json, tempfile
 import maya.cmds as cmds
+import maya.api.OpenMaya as om
 import importlib.util
 import tmlib
 
@@ -56,6 +57,19 @@ def get_quick_data_dir():
     # if dir not exist
     else:
         return False
+
+
+def require_quick_data_dir():
+    """Return quick data path, or warn and return None if file not saved / folder not created."""
+    quick_data_path = get_quick_data_dir()
+
+    if not quick_data_path:
+        cmds.warning(
+            "Quick Data folder not found. Save the file and press Create first."
+        )
+        return None
+
+    return quick_data_path
 
 
 def backup_controller_and_skin():
@@ -126,28 +140,31 @@ def get_bind_joints_by_json_data(skin_dict):
 
 #     return joint,
 
-def import_skin_quick(enable_transfer=False, import_ng=True):
+def import_skin_quick(enable_transfer=False):
     grp_missing_joint = "missing_joint_grp"
-    quick_data_path = get_quick_data_dir()
+    quick_data_path = require_quick_data_dir()
+
+    if not quick_data_path:
+        return
+
     quick_data_skin_path = os.path.join(quick_data_path, "Skin")
     quick_data_skin_transfer_path = os.path.join(quick_data_path, "SkinTransfer")
 
-    selection = cmds.ls(sl=True)
+    selection = cmds.ls(sl=True, long=True)
 
     if not selection:
-        cmds.displayWarning("Selection required before import")
+        cmds.warning("Selection required before import")
         return
 
     list_not_found = []
 
     for sel in selection:
-        sel_name = Utility.cut(sel, hierarchy=True)
         sel_name_cutted = Utility.cut(sel, hierarchy=True, namespace=True)
 
         json_file = os.path.join(quick_data_skin_path, "{}.json".format(sel_name_cutted))
         json_transfer_file = os.path.join(quick_data_skin_transfer_path, "{}.json".format(sel_name_cutted))
 
-        if not cmds.objExists(sel_name):
+        if not cmds.objExists(sel):
             list_not_found.append(sel)
             continue
 
@@ -155,12 +172,18 @@ def import_skin_quick(enable_transfer=False, import_ng=True):
             list_not_found.append(sel)
             continue
 
+        # if shape selected, get transform parent
+        if cmds.objectType(sel, isAType="shape"):
+            sel = cmds.listRelatives(sel, parent=True, fullPath=True)[0]
+
         dict_data = File.load_json_file_to_dict(json_file)
 
-        if enable_transfer is False:
-            dict_transfer = {}
-        elif os.path.exists(json_transfer_file):
-            dict_transfer = File.load_json_file_to_dict(json_transfer_file)
+        if not dict_data:
+            list_not_found.append(sel)
+            continue
+
+        if enable_transfer and os.path.exists(json_transfer_file):
+            dict_transfer = File.load_json_file_to_dict(json_transfer_file) or {}
         else:
             dict_transfer = {}
 
@@ -169,13 +192,22 @@ def import_skin_quick(enable_transfer=False, import_ng=True):
         list_bind_joints = get_bind_joints_by_json_data(dict_data)
 
         # delete old skin cluster
-        old_skin_cluster = SkinWeight.get_skin_cluster_node(sel_name)
+        old_skin_cluster = SkinWeight.get_skin_cluster_node(sel)
         if old_skin_cluster:
             cmds.delete(old_skin_cluster)
 
-        # if nurbsSurface, get transform parent
-        if cmds.objectType(sel_name, isAType="nurbsSurface"):
-            sel_name = cmds.listRelatives(sel_name, parent=True)[0]
+        # transfer : temporary rename new joint to old name stored in file
+        list_rename_restore = []
+        for joint in list_bind_joints:
+            if cmds.objExists(joint) or joint not in dict_transfer:
+                continue
+
+            joint_transfer = dict_transfer[joint]
+            if not cmds.objExists(joint_transfer) or joint_transfer in list_bind_joints:
+                continue
+
+            renamed = cmds.rename(joint_transfer, joint)
+            list_rename_restore.append((renamed, Utility.cut(joint_transfer, hierarchy=True)))
 
         # check missing joints and create placeholders
         for joint in list_bind_joints:
@@ -185,79 +217,58 @@ def import_skin_quick(enable_transfer=False, import_ng=True):
                 joint = cmds.createNode("joint", name=joint)
                 cmds.parent(joint, grp_missing_joint)
 
-        # create new skin cluster — extract [0] since cmds returns a list
-        node_skin_cluster = cmds.skinCluster(
-            sel_name,
-            list_bind_joints,
-            name=dict_data["deformerWeight"]["weights"][0]["deformer"],
-            toSelectedBones=True,
-            ignoreHierarchy=True,
-            bindMethod=0,
-        )[0]
+        try:
+            # create new skin cluster
+            node_skin_cluster = cmds.skinCluster(
+                sel,
+                list_bind_joints,
+                name=dict_data["deformerWeight"]["weights"][0]["deformer"],
+                toSelectedBones=True,
+                ignoreHierarchy=True,
+                bindMethod=0,
+            )[0]
 
-        # import weights
-        dir_path = os.path.dirname(json_file)
-        file_name = os.path.basename(json_file)
+            # import weights
+            cmds.deformerWeights(
+                os.path.basename(json_file),
+                im=True,
+                method="index",
+                deformer=node_skin_cluster,
+                path=os.path.dirname(json_file),
+            )
 
-        cmds.deformerWeights(
-            file_name,
-            im=True,
-            method="index",
-            deformer=node_skin_cluster,
-            path=dir_path,
-        )
+        finally:
+            # restore transfer joint name
+            for renamed, original_name in list_rename_restore:
+                cmds.rename(renamed, original_name)
 
-        cmds.select(sel_name)
+        cmds.select(sel)
         cmds.skinPercent(node_skin_cluster, normalize=True)
 
-
-        # import ng skin
-        if import_ng and not NGSKINTOOLS_AVAILABLE:
-            cmds.displayWarning("ngSkinTools2 not installed, skipping SkinNG import.")
-        elif import_ng:
-            ng_path = json_file.replace("Skin", "SkinNG")
-            print("ng_path : ", ng_path)
-
-            if os.path.exists(ng_path):
-                json_ng_data = File.load_json_file_to_dict(ng_path)
-                vertex_count_ng = len(json_ng_data["layers"][0]["influences"]["0"])
-                vertex_count_mesh = cmds.polyEvaluate(cmds.listRelatives(sel_name, s=True)[0], v=True)
-
-                print(vertex_count_ng,vertex_count_mesh)
-                cmds.select(sel_name)
-                removeLayerData.remove_custom_nodes_from_selection()
-
-                if vertex_count_mesh != vertex_count_ng:
-                    result = cmds.confirmDialog( title='Confirm', message='{} is have diffrent vertex count , what method do you prefer?'.format(sel_name), button=['Index','Distance'], defaultButton='Yes', cancelButton='No', dismissString='No' )
-                else:
-                    result = "Index"
-                    
-                if result == "Index":
-                    import_export.import_json(sel_name,
-                                            vertex_transfer_mode=transfer.VertexTransferMode.vertexId,
-                                              file=ng_path)
-                elif result == "Distance":
-                    import_export.import_json(sel_name,
-                                              vertex_transfer_mode=transfer.VertexTransferMode.closestPoint,
-                                              file=ng_path)
+    cmds.select(selection)
 
     cmds.inViewMessage(
         amg="<hl>Skin Apply!</hl>", pos="botCenter", fit=20, fts=16, fade=True
     )
 
 
-def export_skin_quick(export_ng=True):
+def export_skin_quick():
     """
     Use for export selected skin cluster
     """
 
+    quick_data_path = require_quick_data_dir()
+
+    if not quick_data_path:
+        return
+
     list_skin_cluster = []
     list_mesh_name = []
 
-    selection = cmds.ls(sl=True, type="transform")
-    # selection = 
+    selection = cmds.ls(sl=True, type="transform", long=True)
+
     if not selection:
-        cmds.displayWarning("Selection required before export")
+        cmds.warning("Selection required before export")
         return
 
     for sel in selection:
@@ -273,13 +284,12 @@ def export_skin_quick(export_ng=True):
                 list_mesh_name.append(Utility.cut(sel, hierarchy=True, namespace=True))
 
     if not list_skin_cluster:
-        cmds.displayWarning("Skin cluster node not found on selection")
+        cmds.warning("Skin cluster node not found on selection")
         return
 
     # export maya skin weight .json
-    quick_data_path = get_quick_data_dir()
     file_path = os.path.normpath(os.path.join(quick_data_path, "Skin"))
-    ng_file_path = os.path.normpath(os.path.join(quick_data_path, "SkinNG"))
+    os.makedirs(file_path, exist_ok=True)
 
     for skin_cluster_node, mesh_name in zip(list_skin_cluster, list_mesh_name):
 
@@ -293,15 +303,7 @@ def export_skin_quick(export_ng=True):
             path=file_path,
         )
 
-        # export ngskin tools weight
-        if export_ng and not NGSKINTOOLS_AVAILABLE:
-            cmds.displayWarning("ngSkinTools2 not installed, skipping SkinNG export.")
-        elif export_ng:
-            ng_save_name = os.path.join(ng_file_path, mesh_name)
-
-            mesh_main_name = cmds.ls("*{}".format(mesh_name),"*:{}".format(mesh_name))[0]
-            cmds.select(mesh_main_name)
-            import_export.export_json(mesh_name, file=ng_save_name + ".json")
+    cmds.select(selection)
 
     print("Exported Skin Weight Complete!")
 
@@ -310,14 +312,264 @@ def export_skin_quick(export_ng=True):
     )
 
 
-def import_shape_quick():
-    quick_data_path = get_quick_data_dir()
+def require_ngskintools():
+    """Return True if ngSkinTools2 python module and plugin are ready"""
+    if not NGSKINTOOLS_AVAILABLE:
+        cmds.warning("ngSkinTools2 not installed.")
+        return False
 
-    current_file_path = cmds.file(q=True, sceneName=True)
-    current_file_name = os.path.basename(current_file_path)
-    current_file_name_only = os.path.splitext(current_file_name)[0]
-    key_name = current_file_name.split("_")[0]
+    if not cmds.pluginInfo("ngSkinTools2", query=True, loaded=True):
+        try:
+            cmds.loadPlugin("ngSkinTools2", quiet=True)
+        except RuntimeError:
+            cmds.warning("Cannot load ngSkinTools2 plugin.")
+            return False
+
+    return True
+
+
+def get_selected_skinned_mesh():
+    """Return list of (mesh transform, file name) of selected mesh that have skin cluster"""
+    list_return = []
+
+    for sel in cmds.ls(sl=True, type="transform", long=True):
+        if not cmds.listRelatives(sel, children=True, type="mesh"):
+            continue
+
+        if not SkinWeight.get_skin_cluster_node(mesh_node=sel):
+            cmds.warning("Skin cluster node not found on : {}".format(sel))
+            continue
+
+        list_return.append((sel, Utility.cut(sel, hierarchy=True, namespace=True)))
+
+    return list_return
+
+
+def export_ng_quick():
+    """
+    Export ngSkinTools2 layers of selected mesh to QuickData/SkinNG,
+    if mesh don't have ng layers yet, will init layers from current skin weight
+    """
+
+    quick_data_path = require_quick_data_dir()
+
+    if not quick_data_path or not require_ngskintools():
+        return
+
+    selection = cmds.ls(sl=True, long=True)
+    list_mesh = get_selected_skinned_mesh()
+
+    if not list_mesh:
+        cmds.warning("Select skinned mesh before export ng")
+        return
+
+    from ngSkinTools2.api import init_layers
+
+    ng_file_path = os.path.normpath(os.path.join(quick_data_path, "SkinNG"))
+    os.makedirs(ng_file_path, exist_ok=True)
+
+    for mesh, mesh_name in list_mesh:
+        # force init ng layers (first layer take current skin weight)
+        layers = init_layers(mesh)
+        if not layers.list():
+            layers.add("base")
+
+        json_ng_file = os.path.join(ng_file_path, "{}.json".format(mesh_name))
+        import_export.export_json(mesh, file=json_ng_file)
+
+        # store skin cluster name, so import can rebind with the same name
+        skin_cluster = SkinWeight.get_skin_cluster_node(mesh)
+        if skin_cluster:
+            with open(json_ng_file, "r") as f:
+                json_ng_data = json.load(f)
+
+            json_ng_data["skinCluster"] = Utility.cut(skin_cluster, hierarchy=True, namespace=True)
+
+            with open(json_ng_file, "w") as f:
+                json.dump(json_ng_data, f)
+
+    cmds.select(selection)
+
+    cmds.inViewMessage(
+        amg="<hl>Write NG Skin!</hl>", pos="botCenter", fit=20, fts=16, fade=True
+    )
+
+
+def resolve_ng_influence(influence_path):
+    """
+    Find scene node of influence path stored in ng json file
+    order : full path > short name > same name in any namespace
+    """
+    short_name = Utility.cut(influence_path, hierarchy=True)
+    base_name = Utility.cut(short_name, namespace=True)
+
+    if cmds.objExists(influence_path) and len(cmds.ls(influence_path)) == 1:
+        return cmds.ls(influence_path, long=True)[0]
+
+    for pattern in [short_name, base_name, "*:{}".format(base_name)]:
+        list_found = cmds.ls(pattern, type="transform", long=True) or []
+
+        if list_found:
+            if len(list_found) > 1:
+                cmds.warning("Found multiple '{}', use : {}".format(pattern, list_found[0]))
+            return list_found[0]
+
+    return None
+
+
+def import_ng_quick():
+    """
+    Import ngSkinTools2 layers from QuickData/SkinNG to selected mesh,
+    old skin cluster will be deleted and rebind to influences stored in ng file
+    """
+    grp_missing_joint = "missing_joint_grp"
+    quick_data_path = require_quick_data_dir()
+
+    if not quick_data_path or not require_ngskintools():
+        return
+
+    selection = cmds.ls(sl=True, long=True)
+    list_mesh = [
+        (sel, Utility.cut(sel, hierarchy=True, namespace=True))
+        for sel in cmds.ls(sl=True, type="transform", long=True)
+        if cmds.listRelatives(sel, children=True, type="mesh")
+    ]
+
+    if not list_mesh:
+        cmds.warning("Select mesh before import ng")
+        return
+
+    ng_file_path = os.path.join(quick_data_path, "SkinNG")
+    list_not_found = []
+    list_missing_influence = []
+
+    for mesh, mesh_name in list_mesh:
+        json_ng_file = os.path.join(ng_file_path, "{}.json".format(mesh_name))
+
+        json_ng_data = File.load_json_file_to_dict(json_ng_file) if os.path.exists(json_ng_file) else None
+        list_layers = (json_ng_data or {}).get("layers") or []
+
+        if not list_layers:
+            list_not_found.append(mesh_name)
+            continue
+
+        # vertPositions is flat list [x, y, z, x, y, z, ...]
+        vertex_count_ng = len(json_ng_data.get("mesh", {}).get("vertPositions", [])) // 3
+        mesh_shape = cmds.listRelatives(mesh, shapes=True, noIntermediate=True, fullPath=True, type="mesh")[0]
+        vertex_count_mesh = cmds.polyEvaluate(mesh_shape, v=True)
+
+        if vertex_count_mesh != vertex_count_ng:
+            result = cmds.confirmDialog(
+                title="Confirm",
+                message="{} is have diffrent vertex count , what method do you prefer?".format(mesh_name),
+                button=["Index", "Distance", "Skip"],
+                defaultButton="Distance",
+                cancelButton="Skip",
+                dismissString="Skip",
+            )
+        else:
+            result = "Index"
+
+        if result == "Index":
+            vertex_transfer_mode = transfer.VertexTransferMode.vertexId
+        elif result == "Distance":
+            vertex_transfer_mode = transfer.VertexTransferMode.closestPoint
+        else:
+            continue
+
+        # find scene influence of each influence in file, create placeholder if missing
+        list_bind_joints = []
+        for influence in json_ng_data.get("influences", []):
+            joint = resolve_ng_influence(influence["path"])
+
+            if not joint:
+                joint_name = Utility.cut(influence["path"], hierarchy=True, namespace=True)
+                list_missing_influence.append(joint_name)
+
+                if not cmds.objExists(grp_missing_joint):
+                    cmds.group(name=grp_missing_joint, empty=True)
+                joint = cmds.createNode("joint", name=joint_name, parent=grp_missing_joint)
+                joint = cmds.ls(joint, long=True)[0]
+
+            # store scene path, so ng will map influence by exact name
+            influence["path"] = joint
+
+            if joint not in list_bind_joints:
+                list_bind_joints.append(joint)
+
+        # delete old skin cluster (with ng layer data)
+        old_skin_cluster = SkinWeight.get_skin_cluster_node(mesh)
+
+        # name priority : name stored in ng file > old skin cluster name > default
+        skin_cluster_name = json_ng_data.get("skinCluster")
+        if not skin_cluster_name and old_skin_cluster:
+            skin_cluster_name = Utility.cut(old_skin_cluster, hierarchy=True)
+        if not skin_cluster_name:
+            skin_cluster_name = "{}_skinCluster".format(mesh_name)
+
+        if old_skin_cluster:
+            cmds.select(mesh)
+            removeLayerData.remove_custom_nodes_from_selection()
+            cmds.delete(old_skin_cluster)
+
+        # rebind
+        new_skin_cluster = cmds.skinCluster(
+            mesh,
+            list_bind_joints,
+            name=skin_cluster_name,
+            toSelectedBones=True,
+            ignoreHierarchy=True,
+            bindMethod=0,
+        )[0]
+
+        if new_skin_cluster != skin_cluster_name:
+            cmds.warning(
+                "'{}' already exists in scene, skin cluster of {} named : {}".format(
+                    skin_cluster_name, mesh_name, new_skin_cluster
+                )
+            )
+
+        # import from remapped copy of ng file
+        remap_file = os.path.join(tempfile.gettempdir(), "quickdata_ng_{}.json".format(mesh_name))
+        with open(remap_file, "w") as f:
+            json.dump(json_ng_data, f)
+
+        try:
+            import_export.import_json(mesh, vertex_transfer_mode=vertex_transfer_mode, file=remap_file)
+        finally:
+            os.remove(remap_file)
+
+    if list_missing_influence:
+        cmds.warning(
+            "Influence not found, created placeholder in '{}' : {}".format(grp_missing_joint, list_missing_influence)
+        )
+
+    if list_not_found:
+        cmds.warning("NG data not found : {}".format(list_not_found))
+
+    cmds.select([sel for sel in selection if cmds.objExists(sel)])
+
+    cmds.inViewMessage(
+        amg="<hl>NG Skin Apply!</hl>", pos="botCenter", fit=20, fts=16, fade=True
+    )
+
+
+def import_shape_quick():
+    quick_data_path = require_quick_data_dir()
+
+    if not quick_data_path:
+        return
+
+    key_name = get_current_file_keyword()
     read_path = os.path.join(quick_data_path, "Controller", "{}.json".format(key_name))
+
+    # old version save file without underscore as "Name.ma.json"
+    if not os.path.exists(read_path):
+        current_file_name = os.path.basename(cmds.file(q=True, sceneName=True))
+        legacy_path = os.path.join(quick_data_path, "Controller", "{}.json".format(current_file_name.split("_")[0]))
+
+        if os.path.exists(legacy_path):
+            read_path = legacy_path
 
     if os.path.exists(read_path):
         import_shape_custom(file_path=read_path)
@@ -330,7 +582,7 @@ def import_shape_quick():
         )
 
     else:
-        print("{}.json not found".format(key_name))
+        cmds.warning("{} not found".format(read_path))
 
 
 def build_and_read():
@@ -392,15 +644,14 @@ def remove_all_shaders_pm():
 
     # Exclude defaults
     default_sg = {"initialShadingGroup", "initialParticleSE"}
-    shading_engines = [sg for sg in shading_engines if sg.name() not in default_sg]
+    shading_engines = [sg for sg in shading_engines if sg not in default_sg]
 
     for sg in shading_engines:
         # Find connected materials
         materials = []
         for attr in ["surfaceShader", "volumeShader", "displacementShader"]:
-            if sg.attr(attr).isConnected():
-                mats = sg.attr(attr).inputs()
-                materials.extend(mats)
+            mats = cmds.listConnections("{}.{}".format(sg, attr), s=1, d=0) or []
+            materials.extend(mats)
 
         # Delete shading engine + connected materials
         try:
@@ -491,8 +742,8 @@ def hero_ctrl():
     new_file_path = os.path.join(hero_ctrl_path, save_name)
 
     print("hero ctrl path : ", hero_ctrl_path)
-    cmds.displayInfo("Save name : {}".format(save_name))
-    cmds.displayInfo("Hero Ctrl to path : {}".format(new_file_path))
+    om.MGlobal.displayInfo("Save name : {}".format(save_name))
+    om.MGlobal.displayInfo("Hero Ctrl to path : {}".format(new_file_path))
 
     # Rename the current scene to the new path
     cmds.file(rename=new_file_path)
@@ -582,36 +833,40 @@ def get_current_file_keyword():
     current_file_path = cmds.file(q=True, sceneName=True)
     current_file_name = os.path.basename(current_file_path)
     current_file_name_only = os.path.splitext(current_file_name)[0]
-    key_name = current_file_name.split("_")[0]
+    key_name = current_file_name_only.split("_")[0]
 
     return key_name
 
 
 def export_shape_quick():
-    quick_data_path = get_quick_data_dir()
+    quick_data_path = require_quick_data_dir()
 
-    current_file_path = cmds.file(q=True, sceneName=True)
-    current_file_name = os.path.basename(current_file_path)
-    current_file_name_only = os.path.splitext(current_file_name)[0]
-    key_name = current_file_name.split("_")[0]
+    if not quick_data_path:
+        return
+
+    key_name = get_current_file_keyword()
     path = os.path.join(quick_data_path, "Controller", "{}.json".format(key_name))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
 
-    export_shape_custom(file_path=path)
+    if not export_shape_custom(file_path=path):
+        return
 
     cmds.inViewMessage(
         amg="<hl>Controller Backup!</hl>", pos="botCenter", fit=20, fts=16, fade=True
     )
 
 def export_shape_advanced_skeleton_quick():
-    quick_data_path = get_quick_data_dir()
+    quick_data_path = require_quick_data_dir()
 
-    current_file_path = cmds.file(q=True, sceneName=True)
-    current_file_name = os.path.basename(current_file_path)
-    current_file_name_only = os.path.splitext(current_file_name)[0]
-    key_name = current_file_name.split("_")[0]
+    if not quick_data_path:
+        return
+
+    key_name = get_current_file_keyword()
     path = os.path.join(quick_data_path, "Controller", "{}.json".format(key_name))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
 
-    export_shape_custom(file_path=path)
+    if not export_shape_custom(file_path=path):
+        return
 
     cmds.inViewMessage(
         amg="<hl>Controller Backup!</hl>", pos="botCenter", fit=20, fts=16, fade=True
@@ -650,55 +905,66 @@ def export_shape_custom(file_path=""):
     if isinstance(controllers, str):
         controllers = [controllers]
 
+    controllers = list(controllers or [])
+
     # append advance skeleton shape
     if cmds.objExists("ControlSet"):
-        cmds.select("ControlSet")
-        advance_ctrls = cmds.ls(sl=1)
+        advance_ctrls = cmds.sets("ControlSet", q=True) or []
 
         for ctrl in advance_ctrls:
-            if cmds.listRelatives(ctrl, c=1, s=1, typ="nurbsCurve"):
+            if ctrl not in controllers and cmds.listRelatives(ctrl, c=1, s=1, typ="nurbsCurve"):
                 controllers.append(ctrl)
 
     data = {}
 
     for ctrl_name in controllers:
-        try:
-            ctrl = cmds.PyNode(ctrl_name)
-        except:
+        if not cmds.objExists(ctrl_name):
             cmds.warning(f"Controller '{ctrl_name}' does not exist.")
             continue
 
-        if not ctrl.getShapes():
+        ctrl = cmds.ls(ctrl_name)[0]
+        list_shape = cmds.listRelatives(ctrl, c=1, s=1, f=1) or []
+
+        if not list_shape:
             cmds.warning(f"'{ctrl}' has no shapes.")
             continue
 
         # Write Data
-        for shape in ctrl.getShapes(noIntermediate=True):
-            if isinstance(shape, cmds.nodetypes.NurbsCurve):
+        for shape in list_shape:
+            if cmds.getAttr(shape + ".intermediateObject"):
+                continue
+
+            if cmds.nodeType(shape) == "nurbsCurve":
                 shape_data = {}
 
                 # Color data
-                if not shape.overrideEnabled.get():
+                if not cmds.getAttr(shape + ".overrideEnabled"):
                     shape_data["colorData"] = [None, None]
                 else:
-                    if shape.overrideRGBColors.get():
+                    if cmds.getAttr(shape + ".overrideRGBColors"):
                         rgb = (
-                            round(shape.overrideColorR.get(), 3),
-                            round(shape.overrideColorG.get(), 3),
-                            round(shape.overrideColorB.get(), 3),
+                            round(cmds.getAttr(shape + ".overrideColorR"), 3),
+                            round(cmds.getAttr(shape + ".overrideColorG"), 3),
+                            round(cmds.getAttr(shape + ".overrideColorB"), 3),
                         )
                         shape_data["colorData"] = [False, rgb]
                     else:
-                        shape_data["colorData"] = [True, shape.overrideColor.get()]
+                        shape_data["colorData"] = [
+                            True,
+                            cmds.getAttr(shape + ".overrideColor"),
+                        ]
 
                 # CV positions
                 shape_data["cvPositions"] = [
-                    [round(p.x, 4), round(p.y, 4), round(p.z, 4)]
-                    for p in [cmds.pointPosition(cv, local=True) for cv in shape.cv[:]]
+                    [round(p[0], 4), round(p[1], 4), round(p[2], 4)]
+                    for p in [
+                        cmds.pointPosition(cv, local=True)
+                        for cv in cmds.ls(shape + ".cv[*]", fl=1)
+                    ]
                 ]
 
                 # Line width
-                shape_data["lineWidth"] = shape.lineWidth.get()
+                shape_data["lineWidth"] = cmds.getAttr(shape + ".lineWidth")
 
                 # Degree
                 shape_data["degree"] = cmds.getAttr("{}.degree".format(shape))
@@ -709,7 +975,7 @@ def export_shape_custom(file_path=""):
                 # Form
                 shape_data["form"] = cmds.getAttr("{}.form".format(shape))
 
-                data.setdefault(ctrl.name(), {})[shape.name()] = shape_data
+                data.setdefault(ctrl, {})[cmds.ls(shape)[0]] = shape_data
 
     if not data:
         cmds.warning("No valid controllers found. Nothing to export.")
@@ -740,7 +1006,63 @@ def export_shape_custom(file_path=""):
     with open(file_path, "w") as f:
         json.dump(data, f, indent=4)
 
-    cmds.displayInfo("Exported Controller to : {}".format(file_path))
+    om.MGlobal.displayInfo("Exported Controller to : {}".format(file_path))
+
+    return file_path
+
+
+def _curve_shapes(node):
+    """Non-intermediate nurbsCurve shapes of node, in the order export writes them."""
+    return [
+        shape
+        for shape in cmds.listRelatives(node, shapes=True, fullPath=True, typ="nurbsCurve") or []
+        if not cmds.getAttr(shape + ".intermediateObject")
+    ]
+
+
+def _curve_topology(node):
+    """(degree, spans, form) per curve shape -- equal means CVs can be matched 1:1."""
+    return [
+        (
+            cmds.getAttr(shape + ".degree"),
+            cmds.getAttr(shape + ".spans"),
+            cmds.getAttr(shape + ".form"),
+        )
+        for shape in _curve_shapes(node)
+    ]
+
+
+def _replace_control_shapes(ctrl, tmp_ctrl):
+    """Swap ctrl's curve shapes for tmp_ctrl's when shape count / topology differ.
+
+    AdvancedSkeleton (re)builds every control with a single default shape and
+    its "keep curve shapes" only restores shapes whose name still matches --
+    so a saved multi-shape or re-drawn control can't be restored by moving
+    CVs; the shapes themselves must be replaced. Incoming connections on the
+    old first shape (e.g. AS-driven visibility) are re-made on every new one,
+    except construction history (".create"), which would overwrite the curve.
+    """
+    old_shapes = _curve_shapes(ctrl)
+
+    connections = []
+    if old_shapes:
+        pairs = cmds.listConnections(old_shapes[0], source=True, destination=False, plugs=True, connections=True) or []
+        for dst_plug, src_plug in zip(pairs[::2], pairs[1::2]):
+            attr = dst_plug.split(".", 1)[1]
+            if attr != "create":
+                connections.append((src_plug, attr))
+        cmds.delete(old_shapes)
+
+    for shape in _curve_shapes(tmp_ctrl):
+        cmds.parent(shape, ctrl, shape=True, relative=True)
+    Controller.set_proper_shape_name(ctrl)
+
+    for shape in _curve_shapes(ctrl):
+        for src_plug, attr in connections:
+            try:
+                cmds.connectAttr(src_plug, "{}.{}".format(shape, attr), force=True)
+            except RuntimeError as error:
+                cmds.warning("Could not reconnect {} -> {}.{}: {}".format(src_plug, shape, attr, error))
 
 
 def import_shape_custom(file_path=""):
@@ -771,8 +1093,19 @@ def import_shape_custom(file_path=""):
             if not tmp_ctrl:
                 continue
 
-            Transform.match_cvs(ctrl_name, tmp_ctrl)
-            Controller.clone_style([ctrl_name, tmp_ctrl])
+            if _curve_topology(ctrl_name) == _curve_topology(tmp_ctrl):
+                Transform.match_cvs(ctrl_name, tmp_ctrl)
+            else:
+                _replace_control_shapes(ctrl_name, tmp_ctrl)
+
+            # apply style per shape (same order as export)
+            list_ctrl_shape = _curve_shapes(ctrl_name)
+            for shape, shape_data in zip(list_ctrl_shape, dict_curve_data.values()):
+                if cmds.nodeType(shape) != "nurbsCurve":
+                    continue
+
+                Controller.set_color(color_data=shape_data["colorData"], list_input_transform=[shape])
+                Controller.set_line_width(width=shape_data["lineWidth"], list_input_transform=[shape])
 
             cmds.delete(tmp_ctrl)
 
@@ -816,6 +1149,7 @@ def create_script(name=None):
 from tmlib.core import Selection, Attribute,,BlendShape,Connection,Create,Misc,Transform,Utility,SkinWeight,File,Controller,QuickData,System,Geometry,Visualized
 
 import maya.cmds as cmds
+import maya.api.OpenMaya as om
 import maya.api.OpenMaya as om
 import maya.mel as mel
 

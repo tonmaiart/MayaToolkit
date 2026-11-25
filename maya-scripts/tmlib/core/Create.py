@@ -188,7 +188,7 @@ def create_wrap_pin(
         grp_pin_output = cmds.group(em=1, p=grp_output)
 
         u, v = Transform.get_nearest_polygon_parameter(wrap_geo, transform)
-        cmds.setAttr("{}.coordinate[{}].coordinateU.".format(node_uv_pin, i), u)
+        cmds.setAttr("{}.coordinate[{}].coordinateU".format(node_uv_pin, i), u)
         cmds.setAttr("{}.coordinate[{}].coordinateV".format(node_uv_pin, i), v)
 
         cmds.connectAttr(
@@ -200,7 +200,7 @@ def create_wrap_pin(
             "{}.offsetParentMatrix".format(grp_pin_output),
         )
 
-        node_pick_matrix.useRotate.set(use_rotate)
+        cmds.setAttr(node_pick_matrix + ".useRotate", use_rotate)
         cmds.parent(transform, grp_pin_output)
         # cmds.pointConstraint(grp_pin_output,transform,mo=1)
 
@@ -438,10 +438,7 @@ def create_uv_pin(transform=None, components=[0]):
     components are provided by kwarg components (mesh objects (list): [int], nurbsSurface objects (list of lists): [[int,int]])
     """
 
-    if Utility.is_py_node(transform):
-        transform_node = cmds.PyNode(transform)
-    else:
-        transform_node = transform
+    transform_node = str(transform)
 
     # check if there already is a shape origin node
     shapeOrig = None
@@ -485,8 +482,8 @@ def create_uv_pin(transform=None, components=[0]):
     if shapeOrig == None:
         shape = shapes[0]
         dup = cmds.duplicate(shape)
-        shapeOrig = cmds.listRelatives(dup, c=True, s=True)
-        cmds.parent(shapeOrig, transform_node, s=True, r=True)
+        shapeOrig = cmds.listRelatives(dup, c=True, s=True, f=True)[0]
+        shapeOrig = cmds.parent(shapeOrig, transform_node, s=True, r=True)[0]
         cmds.delete(dup)
         shapeOrig = cmds.rename(shapeOrig, "{0}Orig".format(shape))
 
@@ -554,9 +551,9 @@ def create_sticky_gpt(
     # --- unit conversion ---
     def convert(attr):
         uc = cmds.createNode("unitConversion", n=f"{name}_uc")
-        uc.conversionFactor.set(1.0 / unit_conversion)
-        attr >> uc.input
-        return uc.output
+        cmds.setAttr(uc + ".conversionFactor", 1.0 / unit_conversion)
+        cmds.connectAttr(attr, uc + ".input")
+        return uc + ".output"
 
     left_zip, right_zip = [convert(a) for a in list_attr_zip]
     left_dist, right_dist = list_attr_distance
@@ -564,9 +561,9 @@ def create_sticky_gpt(
     # --- build sticky side ---
     def build_side(attr_zip, attr_dist, side_tag):
         remap = cmds.createNode("remapValue", n=f"{name}_{side_tag}_rmv")
-        remap.outputMax.set(half + 1)
-        remap.inputMax.set(1)
-        attr_zip >> remap.inputValue
+        cmds.setAttr(remap + ".outputMax", half + 1)
+        cmds.setAttr(remap + ".inputMax", 1)
+        cmds.connectAttr(attr_zip, remap + ".inputValue")
 
         clamps = []
         for i in range(half):
@@ -575,13 +572,13 @@ def create_sticky_gpt(
             pma = cmds.createNode("plusMinusAverage", n=f"{name}_{side_tag}{i}_pma")
             cmp = cmds.createNode("clamp", n=f"{name}_{side_tag}{i}_cmp")
 
-            md.input1.set(i + offset)
-            attr_dist >> md.input2
-            md.output >> adl.input2
-            remap.outValue >> pma.input1D[0]
-            adl.output >> pma.input1D[1]
-            pma.output1D >> cmp.inputR
-            cmp.maxR.set(1)
+            cmds.setAttr(md + ".input1", i + offset)
+            cmds.connectAttr(attr_dist, md + ".input2")
+            cmds.connectAttr(md + ".output", adl + ".input2")
+            cmds.connectAttr(remap + ".outValue", pma + ".input1D[0]")
+            cmds.connectAttr(adl + ".output", pma + ".input1D[1]")
+            cmds.connectAttr(pma + ".output1D", cmp + ".inputR")
+            cmds.setAttr(cmp + ".maxR", 1)
 
             clamps.append(cmp)
         return clamps
@@ -593,11 +590,11 @@ def create_sticky_gpt(
     def connect(base, zipped, output, driver, tag):
         cns = cmds.parentConstraint(base, zipped, output, mo=1, n=f"{name}_{tag}_pC")[0]
         w = cmds.parentConstraint(cns, q=1, wal=1)
-        driver.outputR >> cns.attr(w[1])
+        cmds.connectAttr(driver + ".outputR", "{}.{}".format(cns, w[1]))
 
         rev = cmds.createNode("reverse", n=f"{name}_{tag}_rev")
-        driver.outputR >> rev.inputX
-        rev.outputX >> cns.attr(w[0])
+        cmds.connectAttr(driver + ".outputR", rev + ".inputX")
+        cmds.connectAttr(rev + ".outputX", "{}.{}".format(cns, w[0]))
 
     # right side
     for i, cmp in enumerate(right_clamps[:-1] if isOdd else right_clamps):
@@ -624,12 +621,12 @@ def create_sticky_gpt(
     if isOdd:
         mid = half - 1
         pma = cmds.createNode("plusMinusAverage", n=f"{name}_mid_pma")
-        left_clamps[-1].outputR >> pma.input1D[0]
-        right_clamps[-1].outputR >> pma.input1D[1]
+        cmds.connectAttr(left_clamps[-1] + ".outputR", pma + ".input1D[0]")
+        cmds.connectAttr(right_clamps[-1] + ".outputR", pma + ".input1D[1]")
 
         cmp = cmds.createNode("clamp", n=f"{name}_mid_cmp")
-        pma.output1D >> cmp.inputR
-        cmp.maxR.set(1)
+        cmds.connectAttr(pma + ".output1D", cmp + ".inputR")
+        cmds.setAttr(cmp + ".maxR", 1)
 
         connect(
             list_base_position[mid],
@@ -1053,11 +1050,15 @@ def create_zipper_both(
         node_add = cmds.createNode("addDoubleLinear")
         node_clamp = cmds.createNode("clamp")
 
-        left_node.zipEach[i] >> node_add.input1
-        right_node.zipEach[count - i - 1] >> node_add.input2
-        node_add.output >> node_clamp.inputR
-        node_clamp.maxR.set(1)
-        node_clamp.outputR >> output_node.zipEach[i]
+        cmds.connectAttr("{}.zipEach[{}]".format(left_node, i), node_add + ".input1")
+        cmds.connectAttr(
+            "{}.zipEach[{}]".format(right_node, count - i - 1), node_add + ".input2"
+        )
+        cmds.connectAttr(node_add + ".output", node_clamp + ".inputR")
+        cmds.setAttr(node_clamp + ".maxR", 1)
+        cmds.connectAttr(
+            node_clamp + ".outputR", "{}.zipEach[{}]".format(output_node, i), f=True
+        )
 
 
 def create_zipper_simple(
@@ -1113,15 +1114,18 @@ def create_zipper_simple(
         if zip_connection:
             node_remap = cmds.createNode("remapValue")
 
-            node_metadata.zipValue >> node_remap.inputValue
+            cmds.connectAttr(node_metadata + ".zipValue", node_remap + ".inputValue")
 
             value_remap = 1 / len(list_upper_driver)
             value_remap = (value_remap * i) + value_remap
 
-            node_metadata.zipRemap[i].set(value_remap)
-            node_metadata.zipRemap[i] >> node_remap.inputMax
+            attr_zip_remap = "{}.zipRemap[{}]".format(node_metadata, i)
+            cmds.setAttr(attr_zip_remap, value_remap)
+            cmds.connectAttr(attr_zip_remap, node_remap + ".inputMax")
 
-            node_remap.outValue >> node_metadata.zipEach[i]
+            cmds.connectAttr(
+                node_remap + ".outValue", "{}.zipEach[{}]".format(node_metadata, i)
+            )
 
         ###############################
         #### Matrix Connection
@@ -1154,53 +1158,50 @@ def create_zipper_simple(
                 "{}.betweenMatrix[{}]".format(node_metadata, i),
             )
 
-            matrix_between = om.MMatrix(node_metadata.betweenMatrix[i].get())
+            attr_between = "{}.betweenMatrix[{}]".format(node_metadata, i)
+            matrix_between = om.MMatrix(cmds.getAttr(attr_between))
 
-            # create output upper matrix
-            matrix_a = om.MMatrix(node_metadata.upperInMatrix[i].get())
-            matrix_offset = matrix_between.inverse() * matrix_a
-            node_metadata.upperOffsetMatrix[i].set(matrix_offset)
+            for part in ("upper", "lower"):
+                attr_in = "{}.{}InMatrix[{}]".format(node_metadata, part, i)
+                attr_offset = "{}.{}OffsetMatrix[{}]".format(node_metadata, part, i)
+                attr_out = "{}.{}OutputMatrix[{}]".format(node_metadata, part, i)
 
-            node_mult_matrix = cmds.createNode("multMatrix")
-            node_metadata.betweenMatrix[i] >> node_mult_matrix.matrixIn[0]
-            node_metadata.upperOffsetMatrix[i] >> node_mult_matrix.matrixIn[1]
-            node_mult_matrix.matrixSum >> node_metadata.upperOutputMatrix[i]
+                # create output matrix
+                matrix_a = om.MMatrix(cmds.getAttr(attr_in))
+                matrix_offset = matrix_between.inverse() * matrix_a
+                cmds.setAttr(attr_offset, list(matrix_offset), typ="matrix")
 
-            # create output lower matrix
-            matrix_a = om.MMatrix(node_metadata.lowerInMatrix[i].get())
-            matrix_offset = matrix_between.inverse() * matrix_a
-            node_metadata.lowerOffsetMatrix[i].set(matrix_offset)
-
-            node_mult_matrix = cmds.createNode("multMatrix")
-            node_metadata.betweenMatrix[i] >> node_mult_matrix.matrixIn[0]
-            node_metadata.lowerOffsetMatrix[i] >> node_mult_matrix.matrixIn[1]
-            node_mult_matrix.matrixSum >> node_metadata.lowerOutputMatrix[i]
+                node_mult_matrix = cmds.createNode("multMatrix")
+                cmds.connectAttr(attr_between, node_mult_matrix + ".matrixIn[0]")
+                cmds.connectAttr(attr_offset, node_mult_matrix + ".matrixIn[1]")
+                cmds.connectAttr(node_mult_matrix + ".matrixSum", attr_out)
 
             # create upper dummy locator to switch constraint
-            loc_upper = cmds.spaceLocator(n="{}_upper_loc".format(upper_target))
-            node_metadata.upperOutputMatrix[i] >> loc_upper.offsetParentMatrix
+            attr_zip_each = "{}.zipEach[{}]".format(node_metadata, i)
 
-            constraint = cmds.parentConstraint(
-                loc_upper, upper_driver, upper_target, mo=False
-            )
-            node_reverse = cmds.createNode("reverse")
+            # create upper / lower dummy locator to switch constraint
+            for part, driver, target in (
+                ("upper", upper_driver, upper_target),
+                ("lower", lower_driver, lower_target),
+            ):
+                loc = cmds.spaceLocator(n="{}_{}_loc".format(target, part))[0]
+                cmds.connectAttr(
+                    "{}.{}OutputMatrix[{}]".format(node_metadata, part, i),
+                    loc + ".offsetParentMatrix",
+                )
 
-            node_metadata.zipEach[i] >> constraint.w0
-            node_metadata.zipEach[i] >> node_reverse.inputX
-            node_reverse.outputX >> constraint.w1
+                constraint = cmds.parentConstraint(loc, driver, target, mo=False)[0]
+                list_weight = cmds.parentConstraint(constraint, q=1, wal=1)
+                node_reverse = cmds.createNode("reverse")
 
-            # create lower dummy locator to switch constraint
-            loc_lower = cmds.spaceLocator(n="{}_lower_loc".format(lower_target))
-            node_metadata.lowerOutputMatrix[i] >> loc_lower.offsetParentMatrix
-
-            constraint = cmds.parentConstraint(
-                loc_lower, lower_driver, lower_target, mo=False
-            )
-            node_reverse = cmds.createNode("reverse")
-
-            node_metadata.zipEach[i] >> constraint.w0
-            node_metadata.zipEach[i] >> node_reverse.inputX
-            node_reverse.outputX >> constraint.w1
+                cmds.connectAttr(
+                    attr_zip_each, "{}.{}".format(constraint, list_weight[0])
+                )
+                cmds.connectAttr(attr_zip_each, node_reverse + ".inputX")
+                cmds.connectAttr(
+                    node_reverse + ".outputX",
+                    "{}.{}".format(constraint, list_weight[1]),
+                )
 
         # update loop count
         i += 1
@@ -1967,14 +1968,19 @@ def create_blend_joint_world_space(jointA, jointB):
 def create_world_vector(objectA, objectB):
     """Create vector in world space"""
 
-    locatorA = cmds.spaceLocator(n="{}_vecPointA".format(objectA))
-    locatorB = cmds.spaceLocator(n="{}_vecPointB".format(objectB))
+    locatorA = cmds.spaceLocator(n="{}_vecPointA".format(objectA))[0]
+    locatorB = cmds.spaceLocator(n="{}_vecPointB".format(objectB))[0]
 
-    Utility.match_parent(locatorA, objectA)
-    Utility.match_parent(locatorB, locatorA)
+    # use returned names: parenting can rename the node if a same-named
+    # sibling already exists, so the original path may no longer be valid
+    locatorA = Utility.match_parent(locatorA, objectA)
+    locatorA = cmds.ls(locatorA, l=1)[0]
 
-    locatorA_shape = cmds.listRelatives(locatorA, c=1, s=1)[0]
-    locatorB_shape = cmds.listRelatives(locatorB, c=1, s=1)[0]
+    locatorB = Utility.match_parent(locatorB, locatorA)
+    locatorB = cmds.ls(locatorB, l=1)[0]
+
+    locatorA_shape = cmds.listRelatives(locatorA, c=1, s=1, f=1)[0]
+    locatorB_shape = cmds.listRelatives(locatorB, c=1, s=1, f=1)[0]
 
     cmds.xform(locatorB, os=True, t=(1, 0, 0))
 
@@ -1983,18 +1989,18 @@ def create_world_vector(objectA, objectB):
     cmds.delete(constraint)
 
     node_pma = cmds.createNode("plusMinusAverage")
-    node_pma.operation.set(2)
+    cmds.setAttr(node_pma + ".operation", 2)
 
-    locatorA_shape.worldPosition[0] >> node_pma.input3D[0]
-    locatorB_shape.worldPosition[0] >> node_pma.input3D[1]
+    cmds.connectAttr(locatorA_shape + ".worldPosition[0]", node_pma + ".input3D[0]")
+    cmds.connectAttr(locatorB_shape + ".worldPosition[0]", node_pma + ".input3D[1]")
 
-    locatorA.visibility.set(False)
+    cmds.setAttr(locatorA + ".visibility", False)
     # locatorB.visibility.set(False)
 
     # Utility.lock_attribute(locatorA, t=True, r=True, s=True, v=True)
     # Utility.lock_attribute(locatorB, t=True, r=True, s=True, v=True)
 
-    return [node_pma.output3D, locatorA]
+    return [node_pma + ".output3D", locatorA]
 
 
 def create_skirt_auto_rot_simple(
@@ -2021,7 +2027,7 @@ def create_skirt_auto_rot_simple(
 
     # create skirt vector to world 90 degree if skirt b is empty
     if not skirtB:
-        skirtB = cmds.spaceLocator(n="tmp")
+        skirtB = cmds.spaceLocator(n="tmp")[0]
         cmds.matchTransform(skirtB, skirtA)
         cmds.xform(skirtB, ws=True, r=True, t=(0, -1, 0))
         skirt_vector_attr, locatorB = Create.create_world_vector(skirtA, skirtB)
@@ -2041,17 +2047,17 @@ def create_skirt_auto_rot_simple(
     else:
         raise Exception("error")
 
-    locator_B_child = cmds.listRelatives(locatorB, c=1, typ="transform")[0]
-    cmds.parent(locator_B_child, w=1)
+    locator_B_child = cmds.listRelatives(locatorB, c=1, typ="transform", f=1)[0]
+    locator_B_child = cmds.parent(locator_B_child, w=1)[0]
 
     Transform.reset_transform(locatorB)
     cmds.parent(locator_B_child, locatorB)
 
     cmds.rotate(
-        locatorB,
         offset_rotate[0],
         offset_rotate[1],
         offset_rotate[2],
+        locatorB,
         r=True,
         os=True,
         fo=True,
@@ -2060,17 +2066,17 @@ def create_skirt_auto_rot_simple(
     # Get Angle Between
     node_angle = cmds.createNode("angleBetween")
 
-    leg_vector_attr >> node_angle.vector1
-    skirt_vector_attr >> node_angle.vector2
+    cmds.connectAttr(leg_vector_attr, node_angle + ".vector1")
+    cmds.connectAttr(skirt_vector_attr, node_angle + ".vector2")
 
     node_clamp = cmds.createNode("clamp")
 
-    node_angle.angle >> node_clamp.inputR
+    cmds.connectAttr(node_angle + ".angle", node_clamp + ".inputR")
 
     # Add Value
     node_add = cmds.createNode("addDoubleLinear")
 
-    node_clamp.outputR >> node_add.input1
+    cmds.connectAttr(node_clamp + ".outputR", node_add + ".input1")
 
     # Set Clamp Value
 
@@ -2083,10 +2089,10 @@ def create_skirt_auto_rot_simple(
         min_value = value1
         max_value = value2
 
-    node_clamp.minR.set(min_value)
-    node_clamp.maxR.set(max_value)
+    cmds.setAttr(node_clamp + ".minR", min_value)
+    cmds.setAttr(node_clamp + ".maxR", max_value)
 
-    node_add.input2.set(-1 * (node_clamp.outputR.get()))
+    cmds.setAttr(node_add + ".input2", -1 * cmds.getAttr(node_clamp + ".outputR"))
 
     # apply connection
     if invert_direction is True:
@@ -2095,7 +2101,7 @@ def create_skirt_auto_rot_simple(
         intensity *= 1
 
     Connection.connect_conversion(
-        input1=node_add.output, conversion=intensity, output=attr_output
+        input1=node_add + ".output", conversion=intensity, output=attr_output
     )
 
 
@@ -2119,7 +2125,7 @@ def create_skirt_auto_rot(
 
     # create skirt vector to world 90 degree if skirt b is empty
     if not skirtB:
-        skirtB = cmds.spaceLocator(n="tmp")
+        skirtB = cmds.spaceLocator(n="tmp")[0]
         cmds.matchTransform(skirtB, skirtA)
         cmds.xform(skirtB, ws=True, r=True, t=(0, -1, 0))
         skirt_vector_attr, locatorB = Create.create_world_vector(skirtA, skirtB)
@@ -2139,17 +2145,17 @@ def create_skirt_auto_rot(
     else:
         raise Exception("error")
 
-    locator_B_child = cmds.listRelatives(locatorB, c=1, typ="transform")[0]
-    cmds.parent(locator_B_child, w=1)
+    locator_B_child = cmds.listRelatives(locatorB, c=1, typ="transform", f=1)[0]
+    locator_B_child = cmds.parent(locator_B_child, w=1)[0]
 
     Transform.reset_transform(locatorB)
     cmds.parent(locator_B_child, locatorB)
 
     cmds.rotate(
-        locatorB,
         offset_rotate[0],
         offset_rotate[1],
         offset_rotate[2],
+        locatorB,
         r=True,
         os=True,
         fo=True,
@@ -2158,17 +2164,17 @@ def create_skirt_auto_rot(
     # Get Angle Between
     node_angle = cmds.createNode("angleBetween")
 
-    leg_vector_attr >> node_angle.vector1
-    skirt_vector_attr >> node_angle.vector2
+    cmds.connectAttr(leg_vector_attr, node_angle + ".vector1")
+    cmds.connectAttr(skirt_vector_attr, node_angle + ".vector2")
 
     node_clamp = cmds.createNode("clamp")
 
-    node_angle.angle >> node_clamp.inputR
+    cmds.connectAttr(node_angle + ".angle", node_clamp + ".inputR")
 
     # Add Value
     node_add = cmds.createNode("addDoubleLinear")
 
-    node_clamp.outputR >> node_add.input1
+    cmds.connectAttr(node_clamp + ".outputR", node_add + ".input1")
 
     # Set Clamp Value
 
@@ -2181,15 +2187,15 @@ def create_skirt_auto_rot(
         min_value = value1
         max_value = value2
 
-    node_clamp.minR.set(min_value)
-    node_clamp.maxR.set(max_value)
+    cmds.setAttr(node_clamp + ".minR", min_value)
+    cmds.setAttr(node_clamp + ".maxR", max_value)
 
-    node_add.input2.set(-1 * (node_clamp.outputR.get()))
+    cmds.setAttr(node_add + ".input2", -1 * cmds.getAttr(node_clamp + ".outputR"))
 
     # apply connection
 
     Connection.connect_conversion(
-        input1=node_add.output, conversion=invert_drive, output=attr_output
+        input1=node_add + ".output", conversion=invert_drive, output=attr_output
     )
 
 
@@ -2202,8 +2208,8 @@ def create_blend_joint(joint, joint_parent=None):
     cmds.parent(joint_blend, cmds.listRelatives(joint, p=1)[0])
 
     cmds.makeIdentity(joint_blend, a=1, r=1)
-    node_pair_blend.weight.set(0.5)
-    node_pair_blend.rotInterpolation.set(1)
+    cmds.setAttr(node_pair_blend + ".weight", 0.5)
+    cmds.setAttr(node_pair_blend + ".rotInterpolation", 1)
 
     cmds.connectAttr("{}.t".format(joint), "{}.inTranslate1".format(node_pair_blend))
     cmds.connectAttr("{}.r".format(joint), "{}.inRotate1".format(node_pair_blend))
@@ -2315,7 +2321,7 @@ def create_support_joint(
     for axis in axis_left:
         node_mdl = cmds.createNode("multDoubleLinear")
 
-        node_clamp.outputR >> node_mdl.input1
+        cmds.connectAttr(node_clamp + ".outputR", node_mdl + ".input1")
         cmds.connectAttr(
             "{}.bias{}".format(joint_support, axis.upper()),
             "{}.input2".format(node_mdl),
@@ -2330,7 +2336,7 @@ def create_support_joint(
 
     # add joint to mgear sets
     try:
-        defSet = cmds.PyNode("rig_deformers_grp")
+        defSet = "rig_deformers_grp"
         cmds.sets(defSet, add=joint_support)
     except:
         pass
@@ -2441,7 +2447,7 @@ def create_volume_joint(
     for axis in axis_left:
         node_mdl = cmds.createNode("multDoubleLinear")
 
-        node_clamp.outputR >> node_mdl.input1
+        cmds.connectAttr(node_clamp + ".outputR", node_mdl + ".input1")
         cmds.connectAttr(
             "{}.bias{}".format(joint_support, axis.upper()),
             "{}.input2".format(node_mdl),
@@ -2456,7 +2462,7 @@ def create_volume_joint(
 
     # add joint to mgear sets
     try:
-        defSet = cmds.PyNode("rig_deformers_grp")
+        defSet = "rig_deformers_grp"
         cmds.sets(defSet, add=joint_support)
     except:
         pass
@@ -2496,8 +2502,8 @@ def create_corrective_joint_four(
     cmds.parent(joint_blend, cmds.listRelatives(joint, p=1)[0])
 
     cmds.makeIdentity(joint_blend, a=1, r=1)
-    node_pair_blend.weight.set(0.5)
-    node_pair_blend.rotInterpolation.set(1)
+    cmds.setAttr(node_pair_blend + ".weight", 0.5)
+    cmds.setAttr(node_pair_blend + ".rotInterpolation", 1)
 
     cmds.connectAttr("{}.t".format(joint), "{}.inTranslate1".format(node_pair_blend))
     cmds.connectAttr("{}.r".format(joint), "{}.inRotate1".format(node_pair_blend))
@@ -2589,7 +2595,7 @@ def create_corrective_joint_four(
 
         # add joint to mgear sets
         try:
-            defSet = cmds.PyNode("rig_deformers_grp")
+            defSet = "rig_deformers_grp"
             cmds.sets(defSet, add=joint_support)
         except:
             pass
@@ -2957,7 +2963,7 @@ def create_ik_reverse(
             # create reversed chain joint
             cmds.select(cl=1)
             for i, joint in enumerate(list_pivot_joint):
-                joint.visibility.set(False)
+                cmds.setAttr(joint + ".visibility", False)
                 cmds.matchTransform(joint, list_pivot_match[i], pos=1)
                 cmds.matchTransform(joint, jnt_ball_ik, rot=1)
                 cmds.makeIdentity(joint, a=1, s=1, r=1)
@@ -2966,19 +2972,19 @@ def create_ik_reverse(
 
             # orient constraint piv to ik joint
 
-            loc_ball_orient = cmds.spaceLocator(n="{}_ballOrient_loc".format(name_tag))
-            loc_ball_orient.visibility.set(False)
+            loc_ball_orient = cmds.spaceLocator(n="{}_ballOrient_loc".format(name_tag))[0]
+            cmds.setAttr(loc_ball_orient + ".visibility", False)
             constraint = cmds.parentConstraint(jnt_ball_ik, loc_ball_orient)
             cmds.delete(constraint)
             cmds.parent(loc_ball_orient, piv_outer)
             constraint_toe_orient.append(
-                cmds.orientConstraint(loc_ball_orient, jnt_ball_ik)
+                cmds.orientConstraint(loc_ball_orient, jnt_ball_ik)[0]
             )
 
             loc_ankle_orient = cmds.spaceLocator(
                 n="{}_ankleOrient_loc".format(name_tag)
-            )
-            loc_ankle_orient.visibility.set(False)
+            )[0]
+            cmds.setAttr(loc_ankle_orient + ".visibility", False)
             cmds.connectAttr(
                 control_parent_ik + ".rotateOrder",
                 loc_ankle_orient + ".rotateOrder",
@@ -3325,10 +3331,7 @@ def create_locator_on_curve(amount, list_curve, size=0.5):
     locators = []
 
     for curve in list_curve:
-        if not Utility.is_py_node(curve):
-            curve = cmds.PyNode(curve)
-
-        curve_transform = curve
+        curve_transform = str(curve)
         curve_shape = cmds.listRelatives(curve_transform, c=1, s=1, typ="nurbsCurve")[0]
 
         if "crv_" in curve_transform:
@@ -3339,7 +3342,7 @@ def create_locator_on_curve(amount, list_curve, size=0.5):
         for i in range(amount):
             locator = cmds.spaceLocator(
                 n="loc_" + main_name + "_" + str(i + 1).zfill(2)
-            )
+            )[0]
             node = cmds.createNode("pointOnCurveInfo")
 
             if amount == 1:
@@ -3348,11 +3351,11 @@ def create_locator_on_curve(amount, list_curve, size=0.5):
                 param = i * (1 / (amount - 1))
 
             # connect locator
-            node.turnOnPercentage.set(True)
-            node.parameter.set(param)
+            cmds.setAttr(node + ".turnOnPercentage", True)
+            cmds.setAttr(node + ".parameter", param)
 
-            curve_shape.worldSpace >> node.inputCurve
-            node.position >> locator.translate
+            cmds.connectAttr(curve_shape + ".worldSpace", node + ".inputCurve")
+            cmds.connectAttr(node + ".position", locator + ".translate")
 
             locators.append(locator)
 

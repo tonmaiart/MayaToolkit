@@ -215,11 +215,8 @@ def add_multi_skin_cluster(mesh, list_joint, name="skinCluster_add"):
     # GET VARIABLES -----------------------------------------
     # first selection must be mesh , all after is joint
 
-    mesh = Utility.make_pynode(mesh)
-
-    list_joint_node = []
-    for joint in list_joint:
-        list_joint_node.append(Utility.make_pynode(joint))
+    mesh = str(mesh)
+    list_joint_node = [str(joint) for joint in list_joint]
 
     def add_for_mesh():
         def get_shape_origin(obj):
@@ -260,7 +257,7 @@ def add_multi_skin_cluster(mesh, list_joint, name="skinCluster_add"):
         )
 
         # GET SKIN CLUSTER NEW -----------------------------------------
-        node_skin_cluster_new = cmds.skinCluster(list_joint_node + [mesh_tmp], n=name)
+        node_skin_cluster_new = cmds.skinCluster(list_joint_node + [mesh_tmp], n=name)[0]
 
         # CREATE CONNECTION -----------------
         cmds.connectAttr(
@@ -346,7 +343,7 @@ def add_multi_skin_cluster(mesh, list_joint, name="skinCluster_add"):
         )
 
         # GET SKIN CLUSTER NEW -----------------------------------------
-        node_skin_cluster_new = cmds.skinCluster(list_joint + [mesh_tmp], n=name)
+        node_skin_cluster_new = cmds.skinCluster(list_joint_node + [mesh_tmp], n=name)[0]
         print("skin cluster result : ", node_skin_cluster_new)
         # CREATE CONNECTION -----------------
         cmds.connectAttr(
@@ -390,16 +387,16 @@ def add_multi_skin_cluster(mesh, list_joint, name="skinCluster_add"):
 
 def remap_and_apply_weights(weight_data, new_surface, new_influences, skinCluster=None):
     """
-    Remap existing skin weight data to a new surface and apply it in Maya (PyMEL version).
+    Remap existing skin weight data to a new surface and apply it in Maya.
 
     :param weight_data: dict, original cv -> {influence: weight}
-    :param new_surface: str or PyNode, new NURBS surface shape
-    :param new_influences: list[str] or list[PyNode], new influences (must match old count)
-    :param skinCluster: str or PyNode, optional skinCluster name (if None, will create one)
+    :param new_surface: str, new NURBS surface shape
+    :param new_influences: list[str], new influences (must match old count)
+    :param skinCluster: str, optional skinCluster name (if None, will create one)
     :return: dict, remapped weight data
     """
-    new_surface = cmds.PyNode(new_surface)
-    new_influences = [cmds.PyNode(x) for x in new_influences]
+    new_surface = str(new_surface)
+    new_influences = [str(x) for x in new_influences]
 
     # get old influences from the first CV in the data
     old_influences = list(next(iter(weight_data.values())).keys())
@@ -413,15 +410,14 @@ def remap_and_apply_weights(weight_data, new_surface, new_influences, skinCluste
     if skinCluster is None:
         skinCluster = cmds.skinCluster(new_influences, new_surface, tsb=True)[0]
     else:
-        skinCluster = cmds.PyNode(skinCluster)
+        skinCluster = str(skinCluster)
 
     new_data = {}
 
     for cv, infl_weights in weight_data.items():
         # build new CV name (replace surface name)
         cv_index = cv.split(".")[1]  # e.g. "cv[0][1]"
-        cv_str = "{}.{}".format(new_surface.name(), cv_index)
-        cv_pynode = cmds.PyNode(cv_str)
+        cv_str = "{}.{}".format(new_surface, cv_index)
 
         # remap influences
         new_weights = {mapping[infl]: weight for infl, weight in infl_weights.items()}
@@ -429,7 +425,7 @@ def remap_and_apply_weights(weight_data, new_surface, new_influences, skinCluste
 
         # apply weights
         for infl, w in new_weights.items():
-            cmds.skinPercent(skinCluster, cv_pynode, transformValue=[(infl, w)])
+            cmds.skinPercent(skinCluster, cv_str, transformValue=[(infl, w)])
 
     return new_data
 
